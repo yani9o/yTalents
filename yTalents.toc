@@ -1,0 +1,18 @@
+## Interface: 16001
+## Title: |cff4b7dccy|cffffffffTalents|r
+## Notes: Save, share and edit talent builds in WoW Forever. /yTalents
+## Notes-deDE: Talentbuilds speichern, teilen und im Talentfenster von WoW Forever bearbeiten. /yTalents
+## Author: yani9o
+## Version: 1.0
+## AddonCompartmentFunc: yTalents_OnAddonCompartmentClick
+## OptionalDeps: yTools
+## SavedVariables: yTalentsDB
+## SavedVariablesPerCharacter: yTalentsCharacterDB
+## IconTexture: Interface\Icons\Ability_Marksmanship
+localization.lua
+Core.lua
+Native.lua
+WebData.lua
+Web.lua
+UI.lua
+Init.lua
