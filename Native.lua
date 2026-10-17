@@ -479,6 +479,7 @@ function T:ClearBuild()
     if InCombatLockdown() then return false, L.EDIT_THE_TALENT_BUILD_AFTER_COMBAT end
     for id in pairs(self.draft.ranks) do self.draft.ranks[id] = 0 end
     self.draft.code = self:EncodeDraft(self.draft)
+    self.selected = nil
     self:UpdateDraftDirty()
     return self:RenderDraft(false)
 end
