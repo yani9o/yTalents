@@ -163,5 +163,5 @@ end)
 
 -- Blizzard addon-compartment entry.
 function yTalents_OnAddonCompartmentClick()
-    T:OpenDefaultTalents()
+    T:Open()
 end
