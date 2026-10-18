@@ -29,13 +29,13 @@ local function Edit(parent, x, y, width)
     return edit
 end
 
-StaticPopupDialogs.TALENTED_FOREVER_CONFIRM = {
+StaticPopupDialogs.YTALENTS_CONFIRM = {
     text = "%s", button1 = L.YES, button2 = L.NO, timeout = 0,
     whileDead = true, hideOnEscape = true, preferredIndex = 3,
     OnAccept = function(_, callback) callback() end,
 }
 
-StaticPopupDialogs.TALENTED_FOREVER_SHARE = {
+StaticPopupDialogs.YTALENTS_SHARE = {
     text = L.WHISPER_THIS_TALENT_BUILD_TO, button1 = L.SEND, button2 = L.CANCEL,
     hasEditBox = true, timeout = 0, whileDead = true, hideOnEscape = true, preferredIndex = 3,
     OnShow = function(dialog)
@@ -78,8 +78,9 @@ function T:CopyBuildText()
 end
 
 function T:ConfirmDiscard(callback)
-    if self:UpdateDraftDirty() then
-        StaticPopup_Show("TALENTED_FOREVER_CONFIRM", L.DISCARD_UNSAVED_CHANGES_TO_THIS_TALENT_BUILD, nil, callback)
+    local saved = self.plannerDraftBeforeSpec
+    if (saved and saved.dirty) or (not saved and self:UpdateDraftDirty()) then
+        StaticPopup_Show("YTALENTS_CONFIRM", L.DISCARD_UNSAVED_CHANGES_TO_THIS_TALENT_BUILD, nil, callback)
     else
         callback()
     end
@@ -94,6 +95,20 @@ end
 function T:RefreshPanel()
     local panel = self.panel
     if not panel then return end
+    if self.specGroupView then
+        panel:Hide()
+        panel.footer:Hide()
+        panel.name:ClearFocus()
+        panel.code:ClearFocus()
+        self.classPicker:Show()
+        self.classPicker:EnableMouse(true)
+        self.classArrow:Show()
+        self.classArrow:SetEnabled(true)
+        if self.classReload then self.classReload:Hide() end
+        self:RefreshPlannerDecorations()
+        return
+    end
+    self.classPicker:EnableMouse(true)
     local spec = self.draft and self.draft.spec or T:GetPlayerSpec()
     local hasSaved = self:HasSavedTemplates(spec)
     local caption = hasSaved and L.SAVED_TALENT_BUILDS or L.NO_TALENT_BUILDS
@@ -127,10 +142,10 @@ function T:RefreshPanel()
     end
     self.classPicker:SetShown(self.plannerTabActive == true)
     self.classArrow:SetShown(self.plannerTabActive == true)
-    self.classArrow:SetEnabled(not InCombatLockdown())
+    self.classArrow:SetEnabled(true)
     if self.classReload then
         self.classReload:SetShown(self.plannerTabActive == true)
-        self.classReload:SetEnabled(not InCombatLockdown() and (self.selected ~= self.currentBuildKey or self.dirty == true))
+        self.classReload:SetEnabled((self.selected ~= self.currentBuildKey or self.dirty == true))
     end
     self:RefreshPlannerDecorations()
 end
@@ -141,18 +156,18 @@ function T:RefreshActionButtons()
     if not panel or not panel.stage then return end
     local name = panel.name:GetText():match("^%s*(.-)%s*$")
     local exists = self.db.templates[name]
-    local planning = draft ~= nil and self.planning == true
+    local planning = draft ~= nil and self.planning == true and not self.unreadableTemplate
     panel.save:SetEnabled(planning and name ~= "" and name ~= self.currentBuildName and not exists)
     local saved = self.selected and self.db.templates[self.selected]
-    local changed = saved and draft and (saved.code ~= draft.code or name ~= self.selected)
+    local changed = not self.unreadableTemplate and saved and draft and (saved.code ~= draft.code or name ~= self.selected)
     panel.update:SetEnabled(planning and changed == true and name ~= "" and (not exists or name == self.selected))
-    panel.delete:SetEnabled(not InCombatLockdown() and self.selected ~= nil and self.selected ~= self.currentBuildKey)
-    panel.clear:SetEnabled(planning and not InCombatLockdown() and self:PointCount() > 0)
-    if panel.importBuild then panel.importBuild:SetEnabled(not InCombatLockdown() and panel.code:GetText():match("%S") ~= nil) end
-    if panel.copyCode then panel.copyCode:SetEnabled(draft ~= nil) end
-    if panel.shareBuild then panel.shareBuild:SetEnabled(draft ~= nil) end
+    panel.delete:SetEnabled(self.selected ~= nil and self.selected ~= self.currentBuildKey)
+    panel.clear:SetEnabled(planning and self:PointCount() > 0)
+    if panel.importBuild then panel.importBuild:SetEnabled(panel.code:GetText():match("%S") ~= nil) end
+    if panel.copyCode then panel.copyCode:SetEnabled(draft ~= nil and not self.unreadableTemplate) end
+    if panel.shareBuild then panel.shareBuild:SetEnabled(draft ~= nil and not self.unreadableTemplate) end
     local config = C_ClassTalents.GetActiveConfigID()
-    panel.stage:SetEnabled(planning and not InCombatLockdown() and self:HasNativeTalents() and draft.spec == T:GetPlayerSpec()
+    panel.stage:SetEnabled(planning and self:HasNativeTalents() and draft.spec == T:GetPlayerSpec()
         and config ~= nil and not C_Traits.ConfigHasStagedChanges(config))
 end
 
@@ -176,6 +191,12 @@ end
 
 function T:RefreshSavedIndicator()
     local panel, notice = self.panel, self.statusNotice
+    if not notice and not self.specGroupView then
+        if self.unreadableTemplate then notice = { text = L.SAVED_BUILD_UNREADABLE, success = false }
+        elseif self.draft and self.draft.recoveryWarning then
+            notice = { text = L.SAVED_BUILD_RECOVERED, success = false }
+        end
+    end
     if not panel or not panel.saved then return end
     if notice then
         panel.saved:SetText(notice.text)
@@ -304,7 +325,7 @@ end
 
 function T:BuildPanel()
     if self.panel then return end
-    local frame, parent = self:GetNativeFrame(), PlayerSpellsFrame
+    local frame, parent = self:GetNativeFrame(), self:GetPlannerWindow()
     local canvas = self:BuildPlannerDisplay()
     local panel = CreateFrame("Frame", nil, canvas)
     self.panel = panel
@@ -316,27 +337,11 @@ function T:BuildPanel()
     footer:SetPoint("TOPLEFT", frame.BackgroundBorder, "BOTTOMLEFT", 16, 0)
     footer:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -20, 8)
     footer:SetFrameLevel(panel:GetFrameLevel())
-    -- Reproduce the original footer's background at its original 701px height.
-    -- Clip that copy to the footer, covering the native Apply button without
-    -- changing Blizzard's button or stretching a whole background into a strip.
-    -- The decorative atlas has transparent areas. Supply an opaque face first.
-    footer.backing = footer:CreateTexture(nil, "BACKGROUND", nil, -8)
-    footer.backing:SetAllPoints()
-    footer.backing:SetColorTexture(0.095, 0.08, 0.067, 1)
-    footer:SetClipsChildren(true)
-    local footerBackground = CreateFrame("Frame", nil, footer)
-    panel.footerBackground = footerBackground
-    footerBackground:SetFrameLevel(footer:GetFrameLevel())
-    footerBackground:SetHeight(701)
-    footerBackground:SetPoint("BOTTOMLEFT", parent, "BOTTOMLEFT", 3, 4)
-    footerBackground:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -3, 4)
-    local footerArt = footerBackground:CreateTexture(nil, "BACKGROUND")
-    footerArt:SetAtlas("Talents-Background-c60", false)
-    footerArt:SetHorizTile(true)
-    footerArt:SetAllPoints()
-    panel:SetScript("OnShow", function() footer:Show(); footerBackground:Show() end)
+    panel:SetScript("OnShow", function()
+        footer:Show()
+    end)
     panel:SetScript("OnHide", function()
-        footer:Hide(); footerBackground:Hide(); panel.name:ClearFocus(); panel.code:ClearFocus()
+        footer:Hide(); panel.name:ClearFocus(); panel.code:ClearFocus()
         self.classPicker:Hide()
         self.classArrow:Hide()
         self.classReload:Hide()
@@ -387,6 +392,10 @@ function T:BuildPanel()
             root:CreateRadio(self:ClassName(spec), function() return self.draft and self.draft.spec == spec end,
                 function()
                     self:ConfirmDiscard(function()
+                        -- Class browsing belongs to the planner. Leave the live
+                        -- spec before replacing its displayed draft so a class
+                        -- selection can never be treated as a live talent edit.
+                        if self.specGroupView then self:EnterPlannerTab() end
                         self.inspectionRequest = nil
                         if spec == T:GetPlayerSpec() then
                             self:Result(self:CaptureCurrent())
@@ -429,7 +438,6 @@ function T:BuildPanel()
     reload:SetScript("OnMouseUp", function() RefreshReload(true) end)
     RefreshReload(false)
     picker:SetScript("OnClick", function()
-        if InCombatLockdown() then self:Message(L.SELECT_THE_CLASS_AFTER_COMBAT, false); return end
         arrow:OpenMenu()
     end)
     arrow:HookScript("OnEnter", picker:GetScript("OnEnter"))
@@ -456,12 +464,12 @@ function T:BuildPanel()
     panel.update = IconButton(panel, 474, "Interface\\Icons\\INV_Misc_EngGizmos_19", L.UPDATE, L.OVERWRITE_THE_SELECTED_SAVED_TALENT_BUILD_WITH_THE_CURRENT_PLAN, function() self:Result(self:SaveTemplate(panel.name:GetText(), true)) end)
     panel.delete = IconButton(panel, 506, "Interface\\Icons\\Ability_Rogue_FeignDeath", L.DELETE_TALENT_BUILD, L.DELETE_THE_SELECTED_SAVED_TALENT_BUILD, function()
         local name = self.selected
-        if name then StaticPopup_Show("TALENTED_FOREVER_CONFIRM", L.DELETE_TALENT_BUILD_2 .. name .. L.TEXT, nil,
+        if name then StaticPopup_Show("YTALENTS_CONFIRM", L.DELETE_TALENT_BUILD_2 .. name .. L.TEXT, nil,
             function() self:Result(self:DeleteTemplate(name)) end) end
     end)
     panel.clear = IconButton(panel, 538, nil, L.RESET_ALL_TALENT_TREES, L.REMOVE_ALL_TALENT_POINTS_FROM_THIS_PLAN, function()
         local draft = self.draft
-        StaticPopup_Show("TALENTED_FOREVER_CONFIRM", L.RESET_ALL_TALENT_POINTS_IN_ALL_THREE_TALENT_TREES, nil, function()
+        StaticPopup_Show("YTALENTS_CONFIRM", L.RESET_ALL_TALENT_POINTS_IN_ALL_THREE_TALENT_TREES, nil, function()
             if self.draft == draft then self:Result(self:ClearBuild()) end
         end)
     end)
@@ -588,7 +596,7 @@ function T:BuildPanel()
         reset:SetPoint("TOPRIGHT", canvas.trees[i], "TOPRIGHT", -6, -6)
         reset:SetScript("OnClick", function()
             local draft = self.draft
-            StaticPopup_Show("TALENTED_FOREVER_CONFIRM", L.RESET_TALENTS_IN .. self:PlanTreeName(index), nil, function()
+            StaticPopup_Show("YTALENTS_CONFIRM", L.RESET_TALENTS_IN .. self:PlanTreeName(index), nil, function()
                 -- A different plan may have been opened while the prompt was visible.
                 if self.draft == draft then self:Result(self:ClearTree(index)) end
             end)
@@ -600,19 +608,11 @@ function T:BuildPanel()
     panel:Hide()
 end
 
-function T:OpenDefaultTalents()
-    if not self.db or not self.db.enabled then self:Message(L.ENABLE_YTALENTS_IN_THE_ADDON_OPTIONS_FIRST, false); return end
-    local ok, err = self:OpenNative()
-    if not ok then self:Message(err, false, InCombatLockdown()); return end
-    if self:HasNativeTalents() then
-        if self.plannerTabActive then self:ShowLiveTalents() end
-    else self:EnterPlannerTab() end
-end
 
 function T:Open()
     if not self.db or not self.db.enabled then self:Message(L.ENABLE_YTALENTS_IN_THE_ADDON_OPTIONS_FIRST, false); return end
     local ok, err = self:OpenNative()
-    if not ok then self:Message(err, false, InCombatLockdown()); return end
+    if not ok then self:Message(err, false, false); return end
     self:EnterPlannerTab()
 end
 

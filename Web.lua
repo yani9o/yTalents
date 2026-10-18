@@ -111,7 +111,6 @@ function T:ImportText(text)
     end
     local spec = slug and self:SpecForSlug(slug)
     if not spec or not allocation then return false, L.THIS_TALENT_CALCULATOR_LINK_CONTAINS_NO_USABLE_TALENT_BUILD end
-    if InCombatLockdown() then return false, L.IMPORT_TALENT_BUILDS_AFTER_COMBAT end
     local oldDraft, oldSelected, oldDirty = self.draft, self.selected, self.dirty
     -- Prepare metadata without rendering an empty build over the current preview.
     local tree = C_ClassTalents.GetTraitTreeForSpec(spec)
@@ -178,7 +177,6 @@ function T:GetExportText(format)
     format = format or self.exportFormat or "native"
     if format == "native" then return draft.code or "" end
     if not draft.nodes then
-        if InCombatLockdown() then return nil, L.IMPORT_TALENT_BUILDS_AFTER_COMBAT end
         local ok = pcall(self.ReadDraftNodes, self)
         if not ok then return nil, L.TALENT_DATA_IS_UNAVAILABLE_TRY_AGAIN end
     end

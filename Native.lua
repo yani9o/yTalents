@@ -8,7 +8,6 @@ end
 
 function T:EnsureNative()
     if not self:GetNativeFrame() then
-        if InCombatLockdown() then return false, L.TALENT_PLANNING_IS_UNAVAILABLE_DURING_COMBAT end
         local ok, loaded
         if PlayerSpellsFrame_LoadUI then
             ok, loaded = pcall(securecallfunction, PlayerSpellsFrame_LoadUI)
@@ -22,6 +21,8 @@ function T:EnsureNative()
         return false, L.THIS_ADDON_REQUIRES_WOW_FOREVER_S_TALENT_WINDOW
     end
     self:InstallNativeControls()
+    self:InstallInspectHooks()
+    self:InstallTalentEntryRoutes()
     return true
 end
 
@@ -52,96 +53,378 @@ function T:GetAvailableTalentPoints()
 end
 
 function T:HasNativeTalents()
+    -- Currency/configuration data may still be empty during login or loading.
+    -- That does not mean an unlocked character needs a planner key override.
+    if PlayerUtil and PlayerUtil.CanUseClassTalents and PlayerUtil.CanUseClassTalents() then return true end
+    if UnitLevel("player") >= 10 then return true end
     local budget = self:GetAvailableTalentPoints()
     if budget ~= nil then return budget > 0 end
-    if PlayerUtil and PlayerUtil.CanUseClassTalents then
-        return PlayerUtil.CanUseClassTalents() == true
-    end
-    return UnitLevel("player") >= 10
+    return false
 end
 
--- Below the native unlock level, OnShow selects the spellbook again. Use
--- Blizzard's decorative frame template on an addon-owned host in that case.
-function T:GetLowLevelPlannerWindow()
-    if self.lowLevelPlannerWindow then return self.lowLevelPlannerWindow end
+-- The planner is an independent overlay, never a page in the protected
+-- PlayerSpellsFrame tab tracker. Its position follows the native window.
+function T:GetPlannerWindow()
+    if self.plannerWindow then return self.plannerWindow end
     local host = CreateFrame("Frame", "yTalentsPlannerWindow", UIParent, "PortraitFrameTemplate")
     host:Hide()
     host:SetSize(1218, 708)
     host:SetPoint("TOP", UIParent, "TOP", 0, -41)
-    host:SetFrameStrata("DIALOG")
+    host:SetFrameStrata("MEDIUM")
     -- Match PlayerSpellsFrame: its portrait/rim use absolute decorative levels.
     if host.SetFrameLevelsFromBaseLevel then host:SetFrameLevelsFromBaseLevel(5000) end
     host:EnableMouse(true)
     host:SetTitle(TALENTS)
-    -- PortraitFrameTemplate supplies a gray body; use the talent window's
-    -- full-height artwork behind the independent tab and bottom controls.
-    host.plannerBacking = host:CreateTexture(nil, "BACKGROUND", nil, 6)
-    host.plannerBacking:SetPoint("TOPLEFT", host, "TOPLEFT", 3, -24)
-    host.plannerBacking:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -3, 4)
-    host.plannerBacking:SetColorTexture(0.095, 0.08, 0.067, 1)
-    host.plannerBackground = host:CreateTexture(nil, "BACKGROUND", nil, 7)
+    -- Draw the talent backdrop above the portrait template background.
+    host.plannerBackgroundFrame = CreateFrame("Frame", nil, host)
+    host.plannerBackgroundFrame:SetAllPoints(host)
+    host.plannerBackgroundFrame:SetFrameLevel(host:GetFrameLevel() + 1)
+    host.plannerBackground = host.plannerBackgroundFrame:CreateTexture(nil, "BACKGROUND")
     host.plannerBackground:SetAtlas("Talents-Background-c60", false)
-    host.plannerBackground:SetHorizTile(true)
-    host.plannerBackground:SetAllPoints(host.plannerBacking)
+    host.plannerBackground:SetHorizTile(false)
+    -- Native TalentsFrame.Background is 701px high and bottom anchored;
+    -- stretching it to the whole host changes both the header and footer.
+    host.plannerBackground:SetHeight(701)
+    host.plannerBackground:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 3, 4)
+    host.plannerBackground:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -3, 4)
+    host:SetScript("OnShow", function()
+        PlaySound(SOUNDKIT.UI_CLASS_TALENT_OPEN_WINDOW)
+    end)
     host:SetScript("OnHide", function()
+        PlaySound(SOUNDKIT.UI_CLASS_TALENT_CLOSE_WINDOW)
+        self:RestorePlannerDraft()
+        if host.searchBox then host.searchBox:ClearFocus() end
+        if self.specViewBar then self.specViewBar:Hide() end
+        if self.specActionBar then self.specActionBar:Hide() end
         self.plannerTabActive = false
         self:LeavePlan()
-        if self.plannerTab then self.plannerTab:Hide() end
-        if self.liveTabProxy then self.liveTabProxy:Hide() end
     end)
     UISpecialFrames = UISpecialFrames or {}
     table.insert(UISpecialFrames, "yTalentsPlannerWindow")
-    self.lowLevelPlannerWindow = host
+    self.plannerWindow = host
     return host
 end
 
+-- These are the same read-only group queries used by Forever's native tabs.
+-- Viewing a group never selects a tab/configuration in PlayerSpellsFrame.
+function T:GetSpecGroupState()
+    local count = GetNumSpecGroups and GetNumSpecGroups() or 1
+    local active = C_SpecializationInfo and C_SpecializationInfo.GetActiveSpecGroup
+        and C_SpecializationInfo.GetActiveSpecGroup() or 1
+    self.specGroupCount, self.activeSpecGroup = math.min(2, count or 1), active or 1
+    return self.specGroupCount, self.activeSpecGroup
+end
+
+
+function T:CacheLiveSpecs()
+    self.liveSpecDrafts = self.liveSpecDrafts or {}
+    local count = self:GetSpecGroupState()
+    local spec, oldDraft = self:GetPlayerSpec(), self.draft
+    local tree = C_ClassTalents.GetTraitTreeForSpec(spec)
+    if not tree then return end
+    for group = 1, count do
+        local config = C_SpecializationInfo.GetCombatConfigIDForSpecGroup(group)
+        if config then
+            local draft = { spec = spec, tree = tree, configID = config, liveConfigID = config,
+                level = 60, nodes = {}, ranks = {}, choices = {}, talentInfo = {}, order = C_Traits.GetTreeNodes(tree) }
+            local ok = pcall(function()
+                local spent = 0
+                for _, id in ipairs(draft.order) do
+                    local node = C_Traits.GetNodeInfo(config, id)
+                    if not node then error("Talent data unavailable") end
+                    draft.nodes[id] = node
+                    draft.ranks[id] = node.ranksPurchased or 0
+                    spent = spent + draft.ranks[id]
+                    local selected = node.activeEntry and node.activeEntry.entryID
+                    draft.choices[id] = 1
+                    for index, entryID in ipairs(node.entryIDs) do
+                        if entryID == selected then draft.choices[id] = index; break end
+                    end
+                end
+                local unspent = 0
+                for _, currency in ipairs(C_Traits.GetTreeCurrencyInfo(config, tree, false) or {}) do
+                    unspent = unspent + (currency.quantity or 0)
+                end
+                draft.unspent, draft.budget = unspent, spent + unspent
+                draft.code = self:EncodeDraft(draft)
+                draft.baselineCode = draft.code
+                self.draft = draft
+                self:GetPlanTrees()
+                draft.groupDisplay = C_Traits.GetGroupDisplayInfoByTreeID(tree) or {}
+                for _, id in ipairs(draft.order) do
+                    local info = { self:GetPlannerTalentInfo(id) }
+                    if info[1] then draft.talentInfo[id] = info end
+                end
+            end)
+            self.draft = oldDraft
+            if ok then
+                self.liveSpecDrafts[group] = draft
+            end
+        else self.liveSpecDrafts[group] = nil end
+    end
+    for group = count + 1, 2 do self.liveSpecDrafts[group] = nil end
+end
+
+function T:ChangeLiveRank(id, delta)
+    if not self.specGroupView then return end
+    local _, active = self:GetSpecGroupState()
+    if self.specGroupView ~= active then return end
+    local config = C_ClassTalents.GetActiveConfigID()
+    if not config or config ~= self.draft.liveConfigID then return end
+    local combat = InCombatLockdown()
+    if delta > 0 then
+        if (self.draft.unspent or 0) <= 0 then return end
+        if combat then
+            if not self:CanPlanRank(id, self:GetPlanTrees()) then return end
+        else
+            local node = C_Traits.GetNodeInfo(config, id)
+            if not node or not node.canPurchaseRank then return end
+        end
+    elseif not C_Traits.CanRefundRank(config, id) then return end
+    -- The permission to commit is separate from staging pending points.
+    -- Allow staging and refunding pending points during combat.
+    if not combat then
+        local canChange, canAdd, reason = C_ClassTalents.CanChangeTalents()
+        if (delta > 0 and not canAdd) or (delta < 0 and not canChange) then
+            if reason and reason ~= "" then self:Message(reason, false, true) end
+            return
+        end
+    end
+    local success
+    if delta > 0 then success = C_Traits.PurchaseRank(config, id)
+    else success = C_Traits.RefundRank(config, id, true) end
+    if not success then self:Message(L.THE_GAME_REJECTED_THE_TALENT_BUILD, false, true) end
+    self:CacheLiveSpecs()
+    self:ShowSpecGroup(active)
+end
+
+function T:ApplyLiveTalents(undo)
+    -- Staging and refunding pending points are allowed; combat commits are blocked.
+    if not undo and InCombatLockdown() then return end
+    if not self.specGroupView or self.liveCommitPending then return end
+    local _, active = self:GetSpecGroupState()
+    if self.specGroupView ~= active then return end
+    local config = C_ClassTalents.GetActiveConfigID()
+    if not config or config ~= self.draft.liveConfigID or not C_Traits.ConfigHasStagedChanges(config) then return end
+    if undo then
+        C_Traits.RollbackConfig(config)
+    else
+        local canChange, canAdd, reason = C_ClassTalents.CanChangeTalents()
+        if not canChange and not canAdd then self:Message(reason, false); return end
+        if C_Traits.IsReadyForCommit and not C_Traits.IsReadyForCommit() then return end
+        self.liveCommitPending = true
+        if C_ClassTalents.CommitConfig() == false then
+            self.liveCommitPending = nil
+            self:Message(L.THE_GAME_REJECTED_THE_TALENT_BUILD, false); return
+        end
+    end
+    self:CacheLiveSpecs()
+    self:ShowSpecGroup(active)
+    self:QueueCurrentTalentsSync()
+end
+
+function T:RestorePlannerDraft()
+    local saved = self.plannerDraftBeforeSpec
+    if saved then
+        self.draft, self.selected, self.dirty, self.newSpec = saved.draft, saved.selected, saved.dirty, saved.newSpec
+        self.plannerDraftBeforeSpec = nil
+    end
+    self.specGroupView = nil
+end
+
+function T:RefreshSpecTabs()
+    if not self.specTabs then return end
+    local count, active = self:GetSpecGroupState()
+    local titles = { DUAL_SPEC_PRIMARY, DUAL_SPEC_SECONDARY }
+    for group, tab in ipairs(self.specTabs) do
+        local text = titles[group]
+        if group == active then
+            text = text .. " " .. CreateAtlasMarkup("Talents-Checkmark-c60", 20, 15)
+        elseif group > count then
+            text = text .. " " .. CreateAtlasMarkup("Talents-lock-c60", 10, 14)
+        end
+        tab:SetText(text)
+        tab:SetEnabled(group <= count)
+        self:SelectPlannerTabArt(tab, self.specGroupView == group)
+        if group > count then
+            tab.Text:SetTextColor(DISABLED_FONT_COLOR:GetRGB())
+        elseif self.specGroupView == group then
+            tab.Text:SetTextColor(HIGHLIGHT_FONT_COLOR:GetRGB())
+        else
+            tab.Text:SetTextColor(NORMAL_FONT_COLOR:GetRGB())
+        end
+    end
+    -- Closing the host hides all children already. Restore the whole tab strip
+    -- when reopening, including Planner while a live spec is selected.
+    self.plannerTab:Show()
+    self.plannerTab:SetEnabled(true)
+    self:SelectPlannerTabArt(self.plannerTab, self.specGroupView == nil)
+    if self.specViewBar then
+        self.specViewBar.label:SetShown(count > 1)
+        self.specViewBar.label:SetText(self.specGroupView == active and TALENT_SPEC_ACTIVE or L.SPEC_GROUP_VIEW)
+        self.specViewBar.activate:SetShown(self.specGroupView ~= nil and self.specGroupView ~= active)
+    end
+end
+
+function T:ShowSpecGroup(group)
+    local count, active = self:GetSpecGroupState()
+    if group > count then self:Message(TALENT_SPEC_LOCKED, false); return end
+    local cache = self.liveSpecDrafts
+    local draft = cache and cache[group]
+    if not draft then self:Message(L.YOUR_ACTIVE_TALENT_CONFIGURATION_IS_UNAVAILABLE, false); return end
+    if not self.specGroupView then
+        self.plannerDraftBeforeSpec = { draft = self.draft, selected = self.selected, dirty = self.dirty, newSpec = self.newSpec }
+    end
+    self.specGroupView, self.draft = group, draft
+    self.lastTalentTab = group
+    self.selected, self.dirty = nil, false
+    self.plannerTabActive = true
+    self:BuildPanel()
+    self:ConfigurePlannerLayout()
+    self:RenderDraft(false)
+    self.specViewBar:Show()
+    self.specActionBar:Show()
+    self:RefreshSpecTabs()
+    local editable = group == active
+    local pending = editable and not self.liveCommitPending and C_Traits.ConfigHasStagedChanges(draft.liveConfigID)
+    self.specActionBar.apply:SetEnabled(pending == true and not InCombatLockdown())
+    self.specActionBar.undo:SetEnabledState(pending == true)
+    self:UpdateLiveApplyGlow(pending == true)
+    self.specActionBar.undo:SetShown(editable and C_Traits.ConfigHasStagedChanges(draft.liveConfigID) == true)
+    self.specViewBar.activate:SetEnabled(true)
+    self.specViewBar.points:SetText(tostring(draft.unspent or 0))
+    local color = (draft.unspent or 0) > 0 and GREEN_FONT_COLOR or GRAY_FONT_COLOR
+    self.specViewBar.points:SetTextColor(color:GetRGBA())
+end
+
+function T:UpdateLiveApplyGlow(pending)
+    local button = self.specActionBar and self.specActionBar.apply
+    if not button then return end
+    -- Camelot uses the static yellow outline, not the retail green emitter.
+    if GlowEmitterFactory then GlowEmitterFactory:Hide(button) end
+    button.YellowGlow:SetShown(pending == true)
+end
+
+function T:CreateSpecViewBar(host)
+    if self.specViewBar then return end
+    local bar = CreateFrame("Frame", nil, host)
+    bar:SetPoint("TOPLEFT", self.plannerCanvas, "TOPLEFT", 16, -14)
+    bar:SetPoint("TOPRIGHT", self.plannerCanvas, "TOPRIGHT", -20, -14)
+    bar:SetHeight(30)
+    bar:SetFrameLevel(self.panel:GetFrameLevel())
+    bar.label = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalLargeLeft")
+    bar.label:SetPoint("LEFT")
+    bar.activate = CreateFrame("Button", nil, bar, "UIPanelButtonTemplate")
+    bar.activate:SetSize(160, 26)
+    bar.activate:SetPoint("LEFT", bar.label, "RIGHT", 20, 0)
+    bar.activate:SetText(TALENT_SPEC_ACTIVATE)
+    bar.activate:SetScript("OnClick", function()
+        local count, active = self:GetSpecGroupState()
+        local group = self.specGroupView
+        if not group or group > count or group == active then return end
+        -- Activate only on an explicit user click, using the same public API
+        -- as Forever's native Activate button. No native tab is selected.
+        C_SpecializationInfo.SetActiveSpecGroup(group)
+    end)
+    bar.label:SetShown((self.specGroupCount or 1) > 1)
+    local border = bar:CreateTexture(nil, "BACKGROUND")
+    -- The atlas includes transparent padding to the left of its number box.
+    -- Preserve its native size and use the same number container as Blizzard.
+    border:SetAtlas("Talents-Square-Box-c60", true)
+    border:SetPoint("TOPRIGHT", self.plannerCanvas, "TOPRIGHT", -20, -6)
+    bar.pointsBorder = border
+    local amount = CreateFrame("Frame", nil, bar)
+    amount:SetSize(48, 36)
+    amount:SetPoint("RIGHT", border, "RIGHT", -4, 0)
+    bar.points = amount:CreateFontString(nil, "OVERLAY", "Game32Font_Shadow2")
+    bar.points:SetPoint("CENTER")
+    bar.unspentLabel = bar:CreateFontString(nil, "OVERLAY", "SystemFont_Shadow_Med1")
+    bar.unspentLabel:SetText(UNSPENT_POINTS)
+    bar.unspentLabel:SetTextColor(1, 1, 1)
+    bar.unspentLabel:SetJustifyH("RIGHT")
+    bar.unspentLabel:SetPoint("RIGHT", border, "LEFT", 60, 0)
+    local actions = CreateFrame("Frame", nil, host)
+    actions:SetPoint("BOTTOM", host, "BOTTOM", 0, 12)
+    actions:SetSize(164, 22)
+    actions:SetFrameLevel(self.panel:GetFrameLevel())
+    actions.apply = CreateFrame("Button", nil, actions, "UIPanelButtonTemplate")
+    actions.apply:SetSize(164, 22)
+    actions.apply:SetPoint("LEFT")
+    actions.apply:SetText(L.APPLY_LIVE_TALENTS)
+    actions.apply:SetScript("OnClick", function() self:ApplyLiveTalents(false) end)
+    local glow = CreateFrame("Frame", nil, actions.apply)
+    glow:SetHeight(1)
+    glow:SetPoint("LEFT", actions.apply, "LEFT", -12, 0)
+    glow:SetPoint("RIGHT", actions.apply, "RIGHT", 12, 0)
+    glow.Left = glow:CreateTexture(nil, "ARTWORK")
+    glow.Left:SetAtlas("newplayertutorial-yellowGlow-redbutton-left", true)
+    glow.Left:SetBlendMode("ADD")
+    glow.Left:SetPoint("LEFT")
+    glow.Right = glow:CreateTexture(nil, "ARTWORK")
+    glow.Right:SetAtlas("newplayertutorial-yellowGlow-redbutton-right", true)
+    glow.Right:SetBlendMode("ADD")
+    glow.Right:SetPoint("RIGHT")
+    glow.Middle = glow:CreateTexture(nil, "ARTWORK")
+    glow.Middle:SetAtlas("newplayertutorial-yellowGlow-redbutton-middle", false)
+    glow.Middle:SetBlendMode("ADD")
+    glow.Middle:SetPoint("TOPLEFT", glow.Left, "TOPRIGHT")
+    glow.Middle:SetPoint("BOTTOMRIGHT", glow.Right, "BOTTOMLEFT")
+    glow:Hide()
+    actions.apply.YellowGlow = glow
+    actions:HookScript("OnHide", function() self:UpdateLiveApplyGlow(false) end)
+    actions.undo = CreateFrame("Button", nil, actions, "IconButtonTemplate")
+    actions.undo:SetSize(25, 25)
+    actions.undo:SetPoint("LEFT", actions.apply, "RIGHT", 14, 0)
+    actions.undo:SetAtlas("talents-button-undo", true)
+    actions.undo:SetHighlightAtlas("talents-button-undo", "ADD")
+    actions.undo:GetHighlightTexture():SetAllPoints(actions.undo.Icon)
+    actions.undo:SetScript("OnEnter", function(owner)
+        GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+        GameTooltip:SetText(TALENT_FRAME_DISCARD_CHANGES_BUTTON_TOOLTIP or L.UNDO_LIVE_TALENTS, 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    actions.undo:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    actions.undo:SetScript("OnClick", function() self:ApplyLiveTalents(true) end)
+    actions.undo:Hide()
+    actions:Hide()
+    self.specActionBar = actions
+    bar:Hide()
+    self.specViewBar = bar
+end
+
 function T:ConfigurePlannerLayout()
-    local native, frame = PlayerSpellsFrame, self:GetNativeFrame()
-    local separate = self.lowLevelPlannerWindow and self.lowLevelPlannerWindow:IsShown()
-    local host = separate and self.lowLevelPlannerWindow or native
+    local frame = self:GetNativeFrame()
+    local host = self:GetPlannerWindow()
     local canvas = self.plannerCanvas
     canvas:SetParent(host)
     canvas:ClearAllPoints()
-    if separate then
-        canvas:SetPoint("TOPLEFT", host, "TOPLEFT", 3, -70)
-        canvas:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -3, 36)
-    else
-        canvas:SetAllPoints(frame.BackgroundBorder)
-    end
-    -- Follow the native node container exactly when it is laid out. The
-    -- separate low-level window needs its own fixed origin instead.
-    canvas.backing:ClearAllPoints()
-    canvas.backing:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 3, 4)
-    canvas.backing:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -3, 4)
+    -- Fixed geometry for the independent talent window.
+    canvas:SetPoint("TOPLEFT", host, "TOPLEFT", 1, -69)
+    canvas:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -1, 36)
     canvas.nodeLayer:ClearAllPoints()
-    if not separate and frame.ButtonsParent then
-        canvas.nodeLayer:SetAllPoints(frame.ButtonsParent)
-        canvas.nodeLayer:SetScale(frame.ButtonsParent:GetScale() or 1)
-    else
-        canvas.nodeLayer:SetScale(1)
-        canvas.nodeLayer:SetPoint("TOPLEFT", canvas, "TOPLEFT", 2, 46)
-        canvas.nodeLayer:SetPoint("BOTTOMRIGHT", canvas, "BOTTOMRIGHT", -2, -4)
-    end
+    canvas.nodeLayer:SetScale(1)
+    canvas.nodeLayer:SetPoint("TOPLEFT", canvas, "TOPLEFT", 2, 46)
+    canvas.nodeLayer:SetPoint("BOTTOMRIGHT", canvas, "BOTTOMRIGHT", -2, -4)
     self.panel:ClearAllPoints()
     self.panel:SetPoint("LEFT", canvas, "TOPLEFT", 16, -29)
     self.panel.footer:ClearAllPoints()
     self.panel.footer:SetPoint("TOPLEFT", canvas, "BOTTOMLEFT", 16, 0)
     self.panel.footer:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -20, 8)
-    -- The standalone portrait frame has its own gray backdrop. Its footer
-    -- artwork must cover the full inner width, outside the inset control row.
-    self.panel.footerBackground:SetParent(separate and host or self.panel.footer)
-    self.panel.footerBackground:SetHeight(separate and 32 or 701)
-    self.panel.footerBackground:ClearAllPoints()
-    self.panel.footerBackground:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 3, 4)
-    self.panel.footerBackground:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -3, 4)
     self.plannerTab:SetParent(host)
     self.plannerTab:ClearAllPoints()
-    if separate then
-        self.plannerTab:SetPoint("BOTTOMLEFT", canvas, "TOPLEFT", 70, 0)
-        self.liveTabProxy:Hide()
-    else
-        self.plannerTab:SetPoint("TOPLEFT", frame.TabSystem, "TOPRIGHT", frame.TabSystem.spacing or 1, 0)
+    local previous
+    for _, tab in ipairs(self.specTabs) do
+        tab:SetParent(host)
+        tab:ClearAllPoints()
+        if previous then tab:SetPoint("LEFT", previous, "RIGHT", frame.TabSystem.spacing or 1, 0)
+        else tab:SetPoint("BOTTOMLEFT", canvas, "TOPLEFT", 70, -4) end
+        tab:Show()
+        previous = tab
     end
+    self.plannerTab:SetPoint("LEFT", previous, "RIGHT", frame.TabSystem.spacing or 1, 0)
+    self:CreateSpecViewBar(host)
+    self:CreateTalentSearch(host)
+    self:RefreshSpecTabs()
     self.classPicker:SetParent(host)
     self.classPicker:ClearAllPoints()
     local portrait = host.GetPortrait and host:GetPortrait()
@@ -156,6 +439,7 @@ function T:ConfigurePlannerLayout()
     self.classPicker.icon:ClearAllPoints()
     self.classPicker.icon:SetAllPoints()
     self.classArrow:SetParent(host)
+    self.classArrow:SetFrameStrata(host:GetFrameStrata())
     self.classArrow:ClearAllPoints()
     if host.TitleContainer then self.classArrow:SetPoint("CENTER", host.TitleContainer, "LEFT", 7.5, 0)
     else self.classArrow:SetPoint("TOPLEFT", host, "TOPLEFT", 53, 1) end
@@ -169,31 +453,22 @@ function T:ConfigurePlannerLayout()
 end
 
 function T:OpenNative()
-    if InCombatLockdown() then return false, L.TALENT_PLANNING_IS_UNAVAILABLE_DURING_COMBAT end
     local ok, err = self:EnsureNative()
     if not ok then return false, err end
-    if InCombatLockdown() then return false, L.TALENT_PLANNING_IS_UNAVAILABLE_DURING_COMBAT end
     local parent = PlayerSpellsFrame
-    if not self:HasNativeTalents() then
-        if parent:IsShown() then securecallfunction(HideUIPanel, parent) end
-        self:GetLowLevelPlannerWindow():Show()
-        return true
-    end
-    if self.lowLevelPlannerWindow then self.lowLevelPlannerWindow:Hide() end
-    -- Native OnShow/OnHide update actionbar grids. Preserve the native callee
-    -- context instead of carrying addon execution into those shared counters.
-    local openTalents = self.nativeOpenTalents or (PlayerSpellsUtil and PlayerSpellsUtil.OpenToClassTalentsTab)
-    if openTalents then
-        -- The native helper also fires our default-entry post-hook. This call
-        -- belongs to the explicit caller; it must not queue a tab switch.
-        local previous = self.openingNativeWindow
-        self.openingNativeWindow = true
-        local opened = pcall(securecallfunction, openTalents)
-        self.openingNativeWindow = previous
-        if not opened then return false, L.THE_GAME_S_TALENT_WINDOW_COULD_NOT_BE_LOADED end
-    else
-        return false, L.THE_GAME_S_TALENT_WINDOW_COULD_NOT_BE_LOADED
-    end
+    local host = self:GetPlannerWindow()
+    self:CloseNativeTalentWindow()
+    -- Anchors do not inherit visibility. The overlay can therefore occupy the
+    -- native window's location even before that window has ever been opened.
+    -- No ShowUIPanel/TrySetTab/SetTab or native opener is executed here.
+    -- The shared frame starts at spellbook dimensions (1618x883). Use its
+    -- talent dimensions without opening it or running native UpdateSize.
+    host:SetSize(tonumber(parent.talentsWidth) or 1218, tonumber(parent.talentsHeight) or 708)
+    host:ClearAllPoints()
+    host:SetPoint("TOP", UIParent, "TOP", 0, -41)
+    self:SyncWindowArtwork()
+    self:CacheLiveSpecs()
+    host:Show()
     return true
 end
 
@@ -209,27 +484,23 @@ function T:HideOverlays()
 end
 
 function T:LeavePlan()
-    self.leavePlanPending = nil
     self.planning = false
-    self.ownsPreview = false
     self:HideOverlays()
     if self.panel then self.panel:Hide() end
 end
 
 function T:RenderDraft(readNodes)
-    if InCombatLockdown() then return false, L.TALENT_PLANNING_IS_UNAVAILABLE_DURING_COMBAT end
     local draft = self.draft
     if not draft then return false, L.OPEN_A_TALENT_BUILD_FIRST end
     if readNodes or not draft.nodes then
         local readOK = pcall(self.ReadDraftNodes, self)
         if not readOK then return false, L.TALENT_DATA_IS_UNAVAILABLE_OR_THE_TALENT_BUILD_CONTAINS_INVALID_RANKS end
     end
-    if draft.baselineCode == draft.code and not draft.baselineAllocation then
+    if not self.specGroupView and draft.baselineCode == draft.code and not draft.baselineAllocation then
         draft.baselineAllocation = self:EncodeDraft(draft)
     end
-    self:UpdateDraftDirty()
+    if self.specGroupView then self.dirty = false else self:UpdateDraftDirty() end
     self.planning = true
-    self.ownsPreview = false
     self:RefreshOverlays()
     self:RefreshPanel()
     return true
@@ -370,7 +641,7 @@ function T:ShareBuild()
         local name = self:CharacterFullName("target")
         if name and name ~= "" then self:SendBuildWhisper(data, name); return end
     end
-    StaticPopup_Show("TALENTED_FOREVER_SHARE", nil, nil, { share = data })
+    StaticPopup_Show("YTALENTS_SHARE", nil, nil, { share = data })
 end
 
 function T:LinkifyBuildMessage(message)
@@ -385,12 +656,12 @@ function T:OpenExternalBuild(code, name, request)
     if not valid or not draft then self:Message(L.INVALID_TALENT_BUILD, false); return end
     self:ConfirmDiscard(function()
         if request and self.inspectionRequest ~= request then return end
-        if not self.db.enabled or InCombatLockdown() then return end
+        if not self.db.enabled then return end
+        self:RestorePlannerDraft()
         local ok, err = self:ImportCode(code)
         if ok then
             -- Loaded allocations are unsaved, but are only dirty after editing.
             self.dirty = false
-            self.ownsPreview = false
             if request then self.inspectionRequest = nil end
             ok, err = self:OpenNative()
             if ok then
@@ -410,7 +681,7 @@ function T:OpenBuildLink(link, text)
     local spec, code = link:match("^addon:yTalents:(%d+):([A-Za-z0-9+/=]+)$")
     if not code then return end
     local ok, err = self:EnsureNative()
-    if not ok or InCombatLockdown() then
+    if not ok then
         self:Message(err or L.OPEN_YTALENTS_AFTER_COMBAT, false)
         return
     end
@@ -425,14 +696,68 @@ function T:OpenBuildLink(link, text)
     self:OpenExternalBuild(code, name and CleanCaption(name))
 end
 
-function T:QueueInspectedString(code)
-    if self.renderingPreview or not code or code == "" or not self.db or not self.db.enabled then return end
+-- Talent-specific entry points must be routed before Blizzard calls
+-- SetInspecting/SetTab. Post-hooks alone run too late during combat.
+function T:InstallTalentEntryRoutes()
+    local util = PlayerSpellsUtil
+    if not util then return end
+    self.talentEntryRoutes = self.talentEntryRoutes or {}
+    for _, key in ipairs({ "OpenToClassTalentsTab", "ToggleClassTalentFrame", "InspectLoadout" }) do
+        if type(util[key]) == "function" and not self.talentEntryRoutes[key] then
+            local original, name = util[key], key
+            self.talentEntryRoutes[key] = original
+            util[key] = function(value, ...)
+                if not self.db or not self.db.enabled then return original(value, ...) end
+                if name == "InspectLoadout" then
+                    local code = type(value) == "string" and value:match("^[^:]+:[^:]+:(.+)$")
+                    if not code then self:Message(L.INVALID_TALENT_BUILD_LINK, false); return end
+                    self:OpenExternalBuild(code)
+                elseif type(value) == "string" and value ~= "" then
+                    self:InspectUnitTalents(value)
+                elseif name == "ToggleClassTalentFrame" then
+                    self:ToggleTalentWindow()
+                else
+                    self:OpenTalentWindow()
+                end
+            end
+        end
+    end
+end
+
+function T:InspectUnitTalents(unit)
+    if not self.db or not self.db.enabled or not UnitExists(unit) then return end
+    local guid = UnitGUID(unit)
+    if not guid then return end
+    local ok, err = self:EnsureNative()
+    if not ok then self:Message(err, false); return end
+    self.inspectionRequest = { unit = unit, guid = guid, name = self:CharacterFullName(unit) }
+    if NotifyInspect then pcall(NotifyInspect, unit) end
+    self:QueueInspectedPlan()
+end
+
+-- Observe inspection requests without replacing Blizzard's handlers or
+-- writing to its protected tab state. Render the copy on our own next tick.
+function T:InstallInspectHooks()
     local parent = PlayerSpellsFrame
+    if not parent or self.inspectHooked or type(parent.SetInspecting) ~= "function" then return end
+    self.inspectHooked = true
+    hooksecurefunc(parent, "SetInspecting", function(_, unit, code)
+        if not self.db or not self.db.enabled then return end
+        if code and code ~= "" then
+            self:QueueInspectedString(code)
+        elseif unit then
+            self.inspectionRequest = { unit = unit, guid = UnitGUID(unit), name = self:CharacterFullName(unit) }
+            self:QueueInspectedPlan()
+        end
+    end)
+end
+
+function T:QueueInspectedString(code)
+    if not code or code == "" or not self.db or not self.db.enabled then return end
     local request = { code = code }
     self.inspectionRequest = request
-    self.ownsPreview = false
     C_Timer.After(0, function()
-        if self.inspectionRequest ~= request or InCombatLockdown() or not self.db.enabled or not parent:IsShown() then return end
+        if self.inspectionRequest ~= request or not self.db.enabled then return end
         self:OpenExternalBuild(code, nil, request)
     end)
 end
@@ -447,11 +772,11 @@ function T:QueueInspectedPlan()
         request = { unit = unit, guid = UnitGUID(unit), name = self:CharacterFullName(unit) }
         self.inspectionRequest = request
     end
-    if not request.unit or request.processing or not parent:IsShown() or InCombatLockdown()
+    if not request.unit or request.processing
         or not C_Traits.GenerateInspectImportString then return end
     C_Timer.After(0, function()
-        if self.inspectionRequest ~= request or request.processing or not self.db.enabled or InCombatLockdown()
-            or not parent:IsShown() or UnitGUID(request.unit) ~= request.guid then return end
+        if self.inspectionRequest ~= request or request.processing or not self.db.enabled
+            or UnitGUID(request.unit) ~= request.guid then return end
         local ok, code = pcall(C_Traits.GenerateInspectImportString, request.unit)
         if not ok or not code or code == "" then return end -- wait for INSPECT_READY
         request.processing = true
@@ -477,13 +802,24 @@ function T:PreviewTemplate(name)
     local ok, err = self:LoadTemplate(name)
     if not ok then return false, err end
     ok, err = self:RenderDraft(true)
+    if not ok then
+        self.unreadableTemplate = name
+        return false, L.SAVED_BUILD_UNREADABLE
+    end
+    if not self:IsPlanValid() then self.draft.recoveryWarning = true end
+    if self.draft.recoveryWarning then
+        self.draft.code = self:EncodeDraft(self.draft)
+        self:ResetDraftBaseline()
+        self:RefreshPanel()
+        return true, L.SAVED_BUILD_RECOVERED
+    end
     return ok, ok and L.TALENT_BUILD_LOADED or err
 end
 
 function T:SyncCurrentTalents()
     local frame = self:GetNativeFrame()
     local config = C_ClassTalents.GetActiveConfigID()
-    if not self.characterDB or not frame or not config or InCombatLockdown()
+    if not self.characterDB or not frame or not config
         or C_Traits.ConfigHasStagedChanges(config) then return false end
     local spec = T:GetPlayerSpec()
     local tree = C_ClassTalents.GetTraitTreeForSpec(spec)
@@ -499,6 +835,10 @@ function T:SyncCurrentTalents()
     local previous = self.characterDB.currentTalents
     self.characterDB.currentTalents = { code = code, spec = spec, level = 60 }
     self.currentTalentsPending = nil
+    if self.plannerWindow and self.plannerWindow:IsShown() then
+        self:RefreshSpecTabs()
+        if self.specGroupView then self:ShowSpecGroup(self.specGroupView); return true end
+    end
     if self.plannerTabActive and self.selected == self.currentBuildKey and not self.dirty
         and (not previous or previous.code ~= code or previous.spec ~= spec) then
         self:PreviewTemplate(self.currentBuildKey)
@@ -517,7 +857,6 @@ function T:QueueCurrentTalentsSync()
 end
 
 function T:CaptureCurrent()
-    if InCombatLockdown() then return false, L.IMPORT_YOUR_CURRENT_TALENTS_AFTER_COMBAT end
     self:SyncCurrentTalents()
     local current = self:GetTemplate(self.currentBuildKey)
     if (not current or current.spec ~= T:GetPlayerSpec()) and UnitLevel("player") < 10 then
@@ -535,12 +874,12 @@ function T:CaptureCurrent()
 end
 
 function T:NewBuild(spec)
-    if InCombatLockdown() then return false, L.CREATE_THE_TALENT_BUILD_AFTER_COMBAT end
     local tree = C_ClassTalents.GetTraitTreeForSpec(spec)
     if not tree then return false, L.THIS_CLASS_S_TALENT_TREE_IS_UNAVAILABLE end
     C_ClassTalents.InitializeViewLoadout(spec, 60)
     local draft = { spec = spec, tree = tree, level = 60, content = {} }
     self.draft = draft
+    self.unreadableTemplate = nil
     local ok = pcall(self.ReadDraftNodes, self)
     if not ok then return false, L.THIS_CLASS_S_TALENT_DATA_IS_NOT_AVAILABLE_YET end
     draft.code = self:EncodeDraft(draft)
@@ -551,8 +890,8 @@ function T:NewBuild(spec)
 end
 
 function T:ClearBuild()
+    if self.unreadableTemplate then return false, L.SAVED_BUILD_UNREADABLE end
     if not self.draft or not self.draft.ranks then return false, L.OPEN_A_TALENT_BUILD_FIRST end
-    if InCombatLockdown() then return false, L.EDIT_THE_TALENT_BUILD_AFTER_COMBAT end
     for id in pairs(self.draft.ranks) do self.draft.ranks[id] = 0 end
     self.draft.code = self:EncodeDraft(self.draft)
     self.selected = nil
@@ -563,9 +902,9 @@ end
 -- Stage changes using the same public trait APIs as Blizzard's buttons.
 -- Never commit automatically, switch specializations, or erase a pending player edit.
 function T:StageBuild()
-    if InCombatLockdown() then return false, L.PREPARE_THE_TALENT_BUILD_AFTER_COMBAT end
     local draft = self.draft
     if not draft then return false, L.OPEN_A_TALENT_BUILD_FIRST end
+    if self.unreadableTemplate or not self:IsPlanValid() then return false, L.REPAIR_BUILD_BEFORE_LEARNING end
     if draft.spec ~= T:GetPlayerSpec() then return false, L.YOU_CAN_ONLY_LEARN_TALENTS_FOR_YOUR_OWN_CLASS end
     local config = C_ClassTalents.GetActiveConfigID()
     if not config then return false, L.YOUR_ACTIVE_TALENT_CONFIGURATION_IS_UNAVAILABLE end
@@ -627,12 +966,12 @@ function T:StageBuild()
     end)
     if not success then
         C_Traits.RollbackConfig(config)
-        frame:RefreshConfigID()
         return false, L.THE_GAME_REJECTED_THE_TALENT_BUILD
     end
-    frame:RefreshConfigID()
     if message then return false, message end
-    self:ShowLiveTalents()
+    self:CacheLiveSpecs()
+    local _, active = self:GetSpecGroupState()
+    self:ShowSpecGroup(active)
     return true, L.TALENTS_PREPARED_REVIEW_THEM_AND_CONFIRM_WITH_APPLY_IN_THE_GAME
 end
 
@@ -775,6 +1114,12 @@ function T:CanPlanRank(id, trees)
 end
 
 function T:IsPlanValid()
+    local draft = self.draft
+    if not draft or not draft.nodes or self:PointCount() > (draft.level or 60) - 9 then return false end
+    for id, rank in pairs(draft.ranks) do
+        local node = draft.nodes[id]
+        if not node or rank < 0 or rank > node.maxRanks or rank % 1 ~= 0 then return false end
+    end
     local trees = self:GetPlanTrees()
     for _, tree in ipairs(trees) do
         for _, entry in ipairs(tree) do
@@ -792,7 +1137,7 @@ function T:PlanTreeName(index)
 end
 
 function T:ClearTree(index)
-    if InCombatLockdown() then return false, L.RESET_TALENT_TREES_AFTER_COMBAT end
+    if self.unreadableTemplate then return false, L.SAVED_BUILD_UNREADABLE end
     local tree = self:GetPlanTrees()[index]
     if not tree or #tree == 0 then return false, L.THIS_TALENT_TREE_S_DATA_IS_UNAVAILABLE end
     for _, entry in ipairs(tree) do self.draft.ranks[entry.id] = 0 end
@@ -804,22 +1149,10 @@ end
 function T:BuildPlannerDisplay()
     if self.plannerCanvas then return self.plannerCanvas end
     local frame = self:GetNativeFrame()
-    local canvas = CreateFrame("Frame", nil, PlayerSpellsFrame)
+    local canvas = CreateFrame("Frame", nil, self:GetPlannerWindow())
     canvas:SetAllPoints(frame.BackgroundBorder)
-    canvas:SetFrameLevel(frame:GetFrameLevel() + 5000)
+    canvas:SetFrameLevel(self:GetPlannerWindow():GetFrameLevel() + 2)
     canvas:EnableMouse(true)
-    -- Class/background atlases contain translucent areas. Cover the native
-    -- nodes and edges underneath before compositing the planner's artwork.
-    canvas.opaqueBacking = canvas:CreateTexture(nil, "BACKGROUND", nil, -8)
-    canvas.opaqueBacking:SetAllPoints()
-    canvas.opaqueBacking:SetColorTexture(0.095, 0.08, 0.067, 1)
-    local background = canvas:CreateTexture(nil, "BACKGROUND")
-    background:SetPoint("BOTTOMLEFT", PlayerSpellsFrame, "BOTTOMLEFT", 3, 4)
-    background:SetPoint("BOTTOMRIGHT", PlayerSpellsFrame, "BOTTOMRIGHT", -3, 4)
-    background:SetHeight(701)
-    background:SetAtlas("Talents-Background-c60", false)
-    background:SetHorizTile(true)
-    canvas.backing = background
     canvas.background = canvas:CreateTexture(nil, "BACKGROUND", nil, 1)
     canvas.background:SetPoint("TOPLEFT", canvas, "TOPLEFT", 2, -4)
     canvas.background:SetPoint("BOTTOMRIGHT", canvas, "BOTTOMRIGHT", -2, 4)
@@ -869,6 +1202,7 @@ function T:GetPlannerTalentInfo(id)
     local draft = self.draft
     local node = draft and draft.nodes[id]
     if not node then return end
+    if draft.talentInfo and draft.talentInfo[id] then return unpack(draft.talentInfo[id]) end
     local entryID = node.entryIDs[draft.choices[id] or 1] or node.entryIDs[1]
     local entry = C_Traits.GetEntryInfo(draft.configID, entryID)
     local definition = entry and C_Traits.GetDefinitionInfo(entry.definitionID)
@@ -916,7 +1250,7 @@ local function AppendTraitTooltip(tooltip, entryID, rank)
 end
 
 function T:ShowPlannerTooltip(button)
-    if not self.planning or not self.draft or InCombatLockdown() then return end
+    if not self.planning or not self.draft then return end
     if not self.plannerTooltip then
         -- The planner owns this frame completely. Do not leave addon-created
         -- tooltip data or formatting on Blizzard's shared GameTooltip, which
@@ -990,21 +1324,14 @@ function T:LeavePlannerTooltip(button)
 end
 
 function T:RefreshOverlays()
-    if not self.plannerTabActive or not self.planning or not self.draft or InCombatLockdown() then return end
+    if not self.plannerTabActive or not self.planning or not self.draft then return end
     local canvas = self:BuildPlannerDisplay()
     local trees = self:GetPlanTrees()
     local used = {}
     local class = self:ClassForSpec(self.draft.spec)
-    local native = self:GetNativeFrame()
-    local separate = self.lowLevelPlannerWindow and self.lowLevelPlannerWindow:IsShown()
     local size, panX, panY = 40, -11, -7
-    if not separate then
-        size = native.GetButtonSize and native:GetButtonSize() or size
-        if native.GetPanOffset then
-            local ok, x, y = pcall(native.GetPanOffset, native)
-            if ok and type(x) == "number" and type(y) == "number" then panX, panY = x, y end
-        end
-    end
+    local canSpend = not self.specGroupView
+        or ((self.draft.unspent or 0) > 0)
     if class then canvas.background:SetAtlas("talent-background-" .. class.token:lower()) end
     for index, entries in ipairs(trees) do
         local tree = canvas.trees[index]
@@ -1017,7 +1344,7 @@ function T:RefreshOverlays()
         tree.points:SetText(points)
         local stepX = 60
         local stepY = 60
-        local groups = C_Traits.GetGroupDisplayInfoByTreeID(self.draft.tree) or {}
+        local groups = self.draft.groupDisplay or C_Traits.GetGroupDisplayInfoByTreeID(self.draft.tree) or {}
         for _, group in ipairs(groups) do
             if group.displayName == tree.name:GetText() then tree.header.Icon:SetTexture(group.icon); break end
         end
@@ -1055,8 +1382,25 @@ function T:RefreshOverlays()
                     button.rankShadows[#button.rankShadows + 1] = shadow
                 end
                 button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+                button:RegisterForDrag("LeftButton")
+                button:SetScript("OnDragStart", function(owner)
+                    local _, active = self:GetSpecGroupState()
+                    if self.specGroupView ~= active or (self.draft.ranks[owner.nodeID] or 0) == 0 then return end
+                    local _, _, _, spellID = self:GetPlannerTalentInfo(owner.nodeID)
+                    if spellID then C_Spell.PickupSpell(spellID) end
+                end)
                 button:SetScript("OnClick", function(owner, mouseButton)
-                    self:ChangeRank(owner.nodeID, mouseButton == "RightButton" and -1 or 1)
+                    if IsModifiedClick and IsModifiedClick("CHATLINK") then
+                        local _, _, _, spellID = self:GetPlannerTalentInfo(owner.nodeID)
+                        local link = spellID and C_Spell.GetSpellLink(spellID)
+                        if link and ChatFrameUtil then ChatFrameUtil.InsertLink(link) end
+                        return
+                    end
+                    if self.specGroupView then
+                        self:ChangeLiveRank(owner.nodeID, mouseButton == "RightButton" and -1 or 1)
+                    else
+                        self:ChangeRank(owner.nodeID, mouseButton == "RightButton" and -1 or 1)
+                    end
                     if self.plannerTooltip and self.plannerTooltip:IsOwned(owner) then self:ShowPlannerTooltip(owner) end
                 end)
                 button:SetScript("OnEnter", function(owner) owner.hover:Show(); self:EnterPlannerTooltip(owner) end)
@@ -1078,10 +1422,11 @@ function T:RefreshOverlays()
                 x, y = 110 + (index - 1) * 400 + entry.col * stepX, -165 - entry.row * stepY
             end
             button:SetPoint("CENTER", canvas.nodeLayer, "TOPLEFT", x, y)
-            local _, icon = self:GetPlannerTalentInfo(entry.id)
+            local talentName, icon = self:GetPlannerTalentInfo(entry.id)
             button.icon:SetTexture(icon)
             local node, rank = self.draft.nodes[entry.id], self.draft.ranks[entry.id] or 0
-            local eligible = self:CanPlanRank(entry.id, trees)
+            local unlocked = self:CanPlanRank(entry.id, trees)
+            local eligible = unlocked and canSpend
             local full = rank >= node.maxRanks
             local color = DISABLED_FONT_COLOR
             local r, g, b = 0.5, 0.5, 0.5
@@ -1095,7 +1440,7 @@ function T:RefreshOverlays()
             for _, other in ipairs(entries) do
                 if other.row < entry.row then lowerPoints = lowerPoints + (self.draft.ranks[other.id] or 0) end
             end
-            local dimmed = rank == 0 and not eligible
+            local dimmed = rank == 0 and not unlocked
             local gated = dimmed and lowerPoints < entry.row * 5
             button.dim:SetAlpha(gated and 0.7 or 0.25)
             button.dim:SetShown(dimmed)
@@ -1180,7 +1525,17 @@ function T:RefreshOverlays()
         if not used[id] then self:LeavePlannerTooltip(button); button:Hide() end
     end
     canvas:Show()
+    self:RefreshSearchMarkers()
     self:RefreshPlannerDecorations()
+    self:RefreshHoveredPlannerTooltip()
+end
+
+function T:RefreshHoveredPlannerTooltip()
+    local hovered = self.plannerTooltipOwner
+    if hovered and hovered.plannerHovered and self.draft.nodes[hovered.nodeID]
+        and self.plannerTooltip and self.plannerTooltip:IsOwned(hovered) then
+        self:ShowPlannerTooltip(hovered)
+    end
 end
 
 function T:GetPlannerPointSummary()
@@ -1197,10 +1552,10 @@ function T:RefreshPlannerDecorations()
         if coords then self.classPicker.icon:SetTexCoord(unpack(coords)) end
     end
     for index, reset in ipairs(self.treeResets or {}) do
-        reset:SetShown(active)
+        reset:SetShown(active and not self.specGroupView)
         local points = 0
         for _, entry in ipairs(self:GetPlanTrees()[index] or {}) do points = points + (self.draft.ranks[entry.id] or 0) end
-        reset:SetEnabled(active and not InCombatLockdown() and points > 0)
+        reset:SetEnabled(active and points > 0)
     end
 end
 
@@ -1213,14 +1568,7 @@ function T:QueuePlannerVisualRefresh()
     end)
 end
 
-function T:RestorePlannerArtwork()
-    -- Class artwork stays native. Decorative background animations are disabled
-    -- consistently in both tabs, so returning to live talents needs no restore.
-end
 
-function T:FixPlannerSearch()
-    -- Search and disabled overlays belong to the native display underneath.
-end
 
 local TAB_ART_KEYS = { "Left", "Middle", "Right", "LeftActive", "MiddleActive", "RightActive",
     "LeftHighlight", "MiddleHighlight", "RightHighlight" }
@@ -1274,164 +1622,307 @@ function T:SelectPlannerTabArt(tab, selected)
     end
 end
 
--- Use Blizzard's tab art on addon-owned controls. The native tab remains
--- logically selected; an independent proxy makes it clickable while planning.
+-- Every tab belongs to the replacement, including live spec tabs.
 function T:RefreshPlannerTabVisuals()
-    if InCombatLockdown() or not self.plannerTab then return end
-    local active = self.plannerTabActive == true
-    self:SelectPlannerTabArt(self.plannerTab, active)
-    local frame = self:GetNativeFrame()
-    local live = frame.TabSystem:GetTabButton(frame:GetActiveTab())
-    if active and live and not (self.lowLevelPlannerWindow and self.lowLevelPlannerWindow:IsShown()) then
-        self.liveTabProxy:ClearAllPoints()
-        self.liveTabProxy:SetAllPoints(live)
-        self.liveTabProxy:SetText(live:GetText() or TALENTS)
-        self:SelectPlannerTabArt(self.liveTabProxy, false)
-        self.liveTabProxy:Show()
-    else
-        self.liveTabProxy:Hide()
-    end
+    if self.plannerTab then self:RefreshSpecTabs() end
 end
 
 function T:EnterPlannerTab()
-    if not self.db.enabled or InCombatLockdown() then return end
+    if not self.db.enabled then return end
+    self.lastTalentTab = "planner"
+    self:RestorePlannerDraft()
+    if self.specViewBar then self.specViewBar:Hide() end
+    if self.specActionBar then self.specActionBar:Hide() end
     self.plannerGeneration = (self.plannerGeneration or 0) + 1
     self.plannerTabActive = true
     self.plannerTab:Show()
     self:RefreshPlannerTabVisuals()
-    self.enteringPlanner = true
     self:BuildPanel()
     self:ConfigurePlannerLayout()
     self:RefreshPlannerTabVisuals()
     self:SyncCurrentTalents()
     self.panel:Show()
     local ok, err
-    if not self.draft or self.selected == self.currentBuildKey then
+    if not self.draft or (self.selected == self.currentBuildKey and not self.dirty) then
         ok, err = self:CaptureCurrent()
     else
         ok, err = self:RenderDraft(not self.draft.nodes)
     end
-    self.enteringPlanner = nil
-    self:FixPlannerSearch()
     self:Result(ok, err)
     self:RefreshPlannerDecorations()
     self:QueuePlannerVisualRefresh()
 end
 
 function T:ShowLiveTalents()
-    if InCombatLockdown() then self.leavePlanPending = true; return end
-    self.plannerGeneration = (self.plannerGeneration or 0) + 1
-    self.plannerTabActive = false
-    self:RefreshPlannerTabVisuals()
-    self:LeavePlan()
-    self:RestorePlannerArtwork()
-    if self.panel then self.panel:Hide() end
-    -- The native tab selection was never changed while planning.
+    local _, active = self:GetSpecGroupState()
+    self:ShowSpecGroup(active)
 end
 
--- These are decorative texture animations only. Their masked spec-art can
--- leave a straight vertical seam in Forever. Stop them without touching the
--- talent configuration, inspection state, buttons, or protected frame state.
-function T:DisableBackgroundAnimations()
-    local frame = self:GetNativeFrame()
-    if not frame or self.backgroundAnimationsDisabled then return end
-    self.backgroundAnimationsDisabled = true
-    for _, animation in ipairs(frame.backgroundAnims or {}) do
-        hooksecurefunc(animation, "Play", function(owner) owner:Stop() end)
-        animation:Stop()
-    end
-    -- Hiding once is insufficient: native tab/spec refreshes can show these
-    -- masked additive textures again. Empty only their cosmetic artwork, and
-    -- keep it empty when the native class-art atlas is refreshed later.
-    for _, key in ipairs({"OverlayBackgroundRight", "OverlayBackgroundMid"}) do
-        local texture = frame[key]
-        if texture then
-            hooksecurefunc(texture, "SetAtlas", function(owner) owner:SetTexture(nil) end)
-            texture:SetTexture(nil)
-        end
-    end
-    for _, key in ipairs({"OverlayBackgroundRight", "OverlayBackgroundMid", "Clouds1", "Clouds2", "AirParticlesClose", "AirParticlesFar"}) do
-        if frame[key] then frame[key]:Hide() end
-    end
-end
 
 function T:InstallNativeControls()
-    if self.nativeHooked or InCombatLockdown() then return end
-    local frame, parent = self:GetNativeFrame(), PlayerSpellsFrame
+    if self.nativeHooked then return end
+    local frame = self:GetNativeFrame()
     if not frame or not frame.TabSystem then return end
     self.nativeHooked = true
-    self:DisableBackgroundAnimations()
-
-    -- A separate button alongside the native tabs. Registering an addon tab or
-    -- replacing SetTab/callbacks taints the native tab system's execution.
+    local host = self:GetPlannerWindow()
     local reference = frame.TabSystem:GetTabButton(frame:GetActiveTab())
     local function NewTab(text)
-        local tab = CreateFrame("Button", nil, parent, "TabSystemButtonArtTemplate")
-        tab:SetFrameStrata("DIALOG")
-        tab:SetFrameLevel(parent:GetFrameLevel() + 1200)
-        tab:EnableMouse(true)
+        local tab = CreateFrame("Button", nil, host, "TabSystemButtonArtTemplate")
+        tab:SetFrameStrata(host:GetFrameStrata())
+        tab:SetFrameLevel(host:GetFrameLevel() + 1200)
         tab.isTabOnTop = reference and reference.isTabOnTop or false
         tab.textOffsetY = reference and reference.textOffsetY or 0
         tab.selectedFontObject = reference and reference.selectedFontObject
         tab.unselectedFontObject = reference and reference.unselectedFontObject
         tab:HandleRotation()
         tab:SetText(text)
-        tab:SetHeight(reference and reference:GetHeight() or 32)
-        tab:SetWidth(math.max(130, tab.Text:GetStringWidth() + 30))
+        tab:SetSize(150, reference and reference:GetHeight() or 32)
         self:CopyNativeTabStyle(tab, reference)
         self:SelectPlannerTabArt(tab, false)
         return tab
     end
-    local plannerButton = NewTab(L.TALENT_PLANNER)
-    plannerButton:SetPoint("TOPLEFT", frame.TabSystem, "TOPRIGHT", frame.TabSystem.spacing or 1, 0)
-    plannerButton:SetScript("OnClick", function() self:Open() end)
-    plannerButton:SetShown(self.db and self.db.enabled and frame:IsVisible())
-    self.plannerTab = plannerButton
-    local liveProxy = NewTab(reference and reference:GetText() or TALENTS)
-    local backing = liveProxy:CreateTexture(nil, "BACKGROUND", nil, -8)
-    backing:SetPoint("TOPLEFT", liveProxy.LeftActive, "TOPLEFT")
-    backing:SetPoint("BOTTOMRIGHT", liveProxy.RightActive, "BOTTOMRIGHT")
-    backing:SetColorTexture(0.055, 0.055, 0.07, 1)
-    liveProxy:SetScript("OnClick", function() self:ShowLiveTalents() end)
-    liveProxy:Hide()
-    self.liveTabProxy = liveProxy
-
-    local function ExitPlanner()
-        self.inspectionRequest = nil
-        self.plannerTabActive = false
-        self:LeavePlan()
-        if not InCombatLockdown() then self:RefreshPlannerTabVisuals() end
-    end
-    -- Leave both native SetTab methods untouched. Their shared tracker is
-    -- used by the secure talent key during combat. OnHide handles navigation
-    -- away from the talent page; native spec-tab clicks only leave our plan.
-    for _, tabID in ipairs(frame:GetTabSet()) do
-        local nativeTab = frame.TabSystem:GetTabButton(tabID)
-        if nativeTab then
-            nativeTab:HookScript("OnClick", function()
-                if self.plannerTabActive then ExitPlanner() end
-            end)
-        end
-    end
-    -- Read incoming inspection strings, without ever writing inspection state.
-    hooksecurefunc(parent, "SetInspectString", function(_, code) self:QueueInspectedString(code) end)
-    if parent.SetInspectUnit then
-        hooksecurefunc(parent, "SetInspectUnit", function(_, unit)
-            if unit and not InCombatLockdown() then
-                self.inspectionRequest = { unit = unit, guid = UnitGUID(unit), name = self:CharacterFullName(unit) }
-                self:QueueInspectedPlan()
+    self.plannerTab = NewTab(L.TALENT_PLANNER)
+    self.plannerTab:SetScript("OnClick", function() self:EnterPlannerTab() end)
+    self.specTabs = {}
+    for group = 1, 2 do
+        local index = group
+        local tab = NewTab(group == 1 and DUAL_SPEC_PRIMARY or DUAL_SPEC_SECONDARY)
+        tab:SetScript("OnClick", function() self:ShowSpecGroup(index) end)
+        tab:SetScript("OnEnter", function(owner)
+            local count = self:GetSpecGroupState()
+            if index > count then
+                GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+                GameTooltip:SetText(TALENT_SPEC_LOCKED, 1, 0.125, 0.125)
+                GameTooltip:Show()
             end
         end)
+        tab:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        self.specTabs[group] = tab
     end
-    frame:HookScript("OnShow", function()
-        if not InCombatLockdown() then plannerButton:SetShown(self.db and self.db.enabled) end
+end
+
+local function CopyTextureAppearance(target, source)
+    if not target or not source or not source.GetTexture then return end
+    local atlas = source.GetAtlas and source:GetAtlas()
+    if atlas and atlas ~= "" then
+        -- SetAtlas owns its UV mapping. Reapplying raw GetTexCoord values can
+        -- replace the atlas crop with coordinates from the underlying sheet.
+        target:SetAtlas(atlas, false)
+    else
+        target:SetTexture(source:GetTexture())
+        if source.GetTexCoord then target:SetTexCoord(source:GetTexCoord()) end
+    end
+    if source.GetVertexColor then target:SetVertexColor(source:GetVertexColor()) end
+    if source.GetAlpha then target:SetAlpha(source:GetAlpha()) end
+    if source.GetBlendMode then target:SetBlendMode(source:GetBlendMode()) end
+    if source.IsHorizTile then target:SetHorizTile(source:IsHorizTile()) end
+    if source.IsVertTile then target:SetVertTile(source:IsVertTile()) end
+    if source.IsShown then target:SetShown(source:IsShown()) end
+end
+
+function T:SyncWindowArtwork()
+    local frame, host = self:GetNativeFrame(), self.plannerWindow
+    if not frame or not host then return end
+    CopyTextureAppearance(host.Bg, PlayerSpellsFrame.Bg)
+    -- The talent backdrop supplies its own header shading. The portrait
+    -- template streaks otherwise show through its translucent upper edge.
+    if host.TopTileStreaks then host.TopTileStreaks:Hide() end
+    -- Stretch a narrow central strip of the native background, matching
+    -- Camelot's smooth header/footer without the atlas's vertical streaks.
+    local background = host.plannerBackground
+    local info = C_Texture.GetAtlasInfo("Talents-Background-c60")
+    background:SetHorizTile(false)
+    background:SetVertTile(false)
+    if info then
+        background:SetTexture(info.file)
+        local center = (info.leftTexCoord + info.rightTexCoord) / 2
+        local texelWidth = (info.rightTexCoord - info.leftTexCoord) / info.rawSize.x
+        background:SetTexCoord(center, center + texelWidth,
+            info.topTexCoord, info.bottomTexCoord)
+    else
+        background:SetAtlas("Talents-Background-c60", false)
+    end
+    background:SetVertexColor(1, 1, 1, 1)
+    background:SetAlpha(1)
+    background:SetBlendMode("BLEND")
+    background:SetHeight(701)
+    background:Show()
+    host.plannerBackgroundFrame:Show()
+end
+
+function T:GetPlannerSearchController()
+    if self.plannerSearchController then return self.plannerSearchController end
+    local source = CreateAndInitFromMixin(TraitSearchSourceMixin,
+        function() return self.draft and self.draft.nodes or {} end,
+        function(entryID)
+            local config = self.draft and self.draft.configID
+            local entry = config and C_Traits.GetEntryInfo(config, entryID)
+            return entry and C_Traits.GetDefinitionInfo(entry.definitionID)
+        end,
+        function() return nil end)
+    self.plannerSearchController = CreateAndInitFromMixin(SpellSearchControllerMixin,
+        { [SpellSearchUtil.SourceType.Trait] = source })
+    return self.plannerSearchController
+end
+
+function T:RefreshSearchMarkers()
+    local canvas = self.plannerCanvas
+    if not canvas then return end
+    local query = self.searchQuery
+    local controller
+    if query and query ~= "" then
+        controller = self:GetPlannerSearchController()
+        controller:ActivateSearchFilter(SpellSearchUtil.FilterType.Text, query)
+        controller:UpdateActiveSearchResults()
+    elseif self.plannerSearchController then
+        self.plannerSearchController:ClearActiveSearchResults()
+    end
+    for id, button in pairs(canvas.buttons) do
+        local match = controller and controller:GetMatchTypeForSourceTypeEntry(SpellSearchUtil.SourceType.Trait, id, nil)
+        if match and not button.searchMarker then
+            local marker = CreateFrame("Frame", nil, button, "TalentButtonSearchIconTemplate")
+            marker:SetSize(63, 63)
+            marker:SetPoint("CENTER", button.icon, "TOPRIGHT")
+            marker.Mouseover:SetSize(18, 18)
+            marker:SetMouseoverEnabled(true)
+            button.searchMarker = marker
+        end
+        if button.searchMarker then
+            button.searchMarker:SetFrameLevel(canvas:GetFrameLevel() + 1100)
+            button.searchMarker:SetMatchType(match)
+        end
+    end
+end
+
+function T:GetTalentSearchResults(query)
+    local results = {}
+    if not self.draft or not query or query == "" then return results end
+    query = query:lower()
+    for id, node in pairs(self.draft.nodes or {}) do
+        local name, icon, entryID, spellID = self:GetPlannerTalentInfo(id)
+        if name and name:lower():find(query, 1, true)
+            and not (self.hidePassivesFromSearch and spellID and C_Spell.IsSpellPassive(spellID)) then
+            local displayName = name
+            if self.showRanksInSearch then
+                displayName = displayName .. " (" .. (self.draft.ranks[id] or 0) .. "/" .. node.maxRanks .. ")"
+            end
+            results[#results + 1] = { name = displayName, searchName = name, icon = icon,
+                resultID = entryID, nodeID = id, desaturate = false }
+        end
+    end
+    table.sort(results, function(a, b) return a.name < b.name end)
+    return results
+end
+
+function T:CreateTalentSearch(host)
+    if host.searchBox then return end
+    -- Addon-owned native search controls. Never reparent or alter Blizzard's
+    -- search box, dropdown, preview container or talent tab state.
+    local preview = CreateFrame("Frame", nil, host, "SpellSearchPreviewContainerTemplate")
+    preview:SetFrameLevel(math.max(host:GetFrameLevel(), self.plannerCanvas:GetFrameLevel()) + 2000)
+    preview:SetWidth(176)
+    -- The native template explicitly puts ScrollBox on HIGH. Our host is
+    -- DIALOG, which outranks HIGH regardless of either frame's level.
+    preview.ScrollBox:SetFrameStrata(host:GetFrameStrata())
+    preview.ScrollBox:SetFrameLevel(preview:GetFrameLevel() + 1)
+    preview:Hide()
+    host.GetSearchPreviewContainer = function() return preview end
+    host.HidePreviewResultSearch = function() preview:Hide() end
+    host.SetPreviewResultSearch = function(_, query)
+        local results = self:GetTalentSearchResults(query)
+        preview:SetPreviewResults(results)
+        preview:SetShown(#results > 0)
+        preview.ScrollBox:ForEachFrame(function(row)
+            row:SetFrameStrata(preview:GetFrameStrata())
+            row:SetFrameLevel(preview.ScrollBox:GetFrameLevel() + 10)
+        end)
+    end
+    host.SetFullResultSearch = function(_, query)
+        self.searchQuery = query and query:lower() or ""
+        if self.planning then self:RefreshOverlays() end
+    end
+    host.OnPreviewSearchResultClicked = function(_, result)
+        host.searchBox:SetText(result.searchName)
+        host:SetFullResultSearch(result.searchName)
+        host.searchBox:ClearFocus()
+        preview:Hide()
+    end
+    local box = CreateFrame("EditBox", nil, host, "SpellSearchBoxTemplate")
+    box:SetAutoFocus(false)
+    box:SetPoint("BOTTOMRIGHT", self.plannerCanvas, "TOPRIGHT", -32, 4)
+    box:SetFrameLevel(host:GetFrameLevel() + 1200)
+    preview:SetPoint("TOPRIGHT", box, "BOTTOMRIGHT", -4, 2)
+    box:SetScript("OnEscapePressed", function(owner) owner:ClearFocus(); preview:Hide() end)
+    host.searchBox = box
+    local options = CreateFrame("DropdownButton", nil, host, "WowStyle1ArrowDropdownTemplate")
+    options:SetPoint("LEFT", box, "RIGHT", 3, -2)
+    options:SetFrameLevel(box:GetFrameLevel())
+    options:SetupMenu(function(_, root)
+        root:CreateCheckbox(CLASS_TALENT_SEARCH_OPTION_HIDE_PASSIVES,
+            function() return self.hidePassivesFromSearch == true end,
+            function() self.hidePassivesFromSearch = not self.hidePassivesFromSearch end)
+        root:CreateCheckbox(CLASS_TALENT_SEARCH_OPTION_SHOW_RANKS,
+            function() return self.showRanksInSearch == true end,
+            function() self.showRanksInSearch = not self.showRanksInSearch end)
     end)
-    frame:HookScript("OnHide", function()
-        -- IsShown on a child remains true when its parent closes. Reset our
-        -- state directly on hide; no inspection cleanup needs to be deferred.
-        ExitPlanner()
-        plannerButton:Hide()
-        liveProxy:Hide()
-    end)
-    parent:HookScript("OnHide", ExitPlanner)
+    host.searchOptions = options
+    box:HookScript("OnHide", function() preview:Hide() end)
+end
+
+function T:PrepareReplacement()
+    if self.preparingReplacement then return self.replacementReady end
+    self.preparingReplacement = true
+    local ok, err = self:EnsureNative()
+    if ok then
+        self:BuildPanel()
+        self:ConfigurePlannerLayout()
+        self:SyncWindowArtwork()
+        self:CacheLiveSpecs()
+        self:SyncCurrentTalents()
+        self.replacementReady = true
+    end
+    self.preparingReplacement = nil
+    return ok, err
+end
+
+function T:IsNativeTalentWindowShown()
+    local native = PlayerSpellsFrame
+    return native and native:IsShown() and native.TalentsFrame and native.TalentsFrame:IsShown()
+end
+
+function T:CloseNativeTalentWindow()
+    if InCombatLockdown() or not self:IsNativeTalentWindowShown() then return end
+    HideUIPanel(PlayerSpellsFrame)
+end
+
+function T:GetLastTalentTab()
+    local count, active = self:GetSpecGroupState()
+    local last = self.lastTalentTab
+    if last == "planner" then return last end
+    local drafts = self.liveSpecDrafts or {}
+    if (last == 1 or last == 2) and last <= count and drafts[last] then return last end
+    -- A missing/locked spec or not-yet-unlocked talent tree must not leave
+    -- the replacement empty when restoring a character's preference.
+    return drafts[active] and active or "planner"
+end
+
+function T:OpenTalentWindow()
+    if not self.db or not self.db.enabled then return end
+    local ok, err = self:PrepareReplacement()
+    if not ok then self:Message(err, false, true); return end
+    self:CloseNativeTalentWindow()
+    self.plannerWindow:Show()
+    local tab = self:GetLastTalentTab()
+    if tab == "planner" then self:EnterPlannerTab()
+    else self:ShowSpecGroup(tab) end
+end
+
+function T:ToggleTalentWindow()
+    local ownShown = self.plannerWindow and self.plannerWindow:IsShown()
+    if ownShown or (not InCombatLockdown() and self:IsNativeTalentWindowShown()) then
+        if ownShown then self.plannerWindow:Hide() end
+        self:CloseNativeTalentWindow()
+    else
+        self:OpenTalentWindow()
+    end
 end

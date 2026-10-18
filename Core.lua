@@ -2,7 +2,6 @@ local _, localization = ...
 local L = localization.L
 local _, T = ...
 _G.yTalents = T
-_G.TalentedForever = T
 T.title = "|cff4b7dccy|r|cffffffffTalents|r"
 T.currentBuildKey = "\001current"
 T.currentBuildName = L.CURRENT_TALENTS
@@ -48,16 +47,14 @@ function T:ClassName(spec)
 end
 
 function T:InitializeDB()
-    -- Also migrate copied legacy SavedVariables files on the first load.
     yTalentsDB = type(yTalentsDB) == "table" and yTalentsDB
-        or (type(TalentedForeverDB) == "table" and TalentedForeverDB or {})
+        or {}
     self.db = yTalentsDB
     self.db.templates = type(self.db.templates) == "table" and self.db.templates or {}
     self.db.enabled = self.db.enabled ~= false
     self.db.version = 1
-    self.db.taintDiagnostics = nil -- discard the temporary troubleshooting report
     yTalentsCharacterDB = type(yTalentsCharacterDB) == "table" and yTalentsCharacterDB
-        or (type(TalentedForeverCharacterDB) == "table" and TalentedForeverCharacterDB or {})
+        or {}
     self.characterDB = yTalentsCharacterDB
 end
 
@@ -100,6 +97,7 @@ function T:ResetDraftBaseline()
 end
 
 function T:UpdateDraftDirty()
+    if self.unreadableTemplate then self.dirty = false; return false end
     local draft = self.draft
     if not draft then self.dirty = false; return false end
     if draft.baselineAllocation and draft.nodes then
@@ -126,8 +124,17 @@ function T:SaveTemplate(name, overwrite)
     if self.db.templates[name] and (not overwrite or name ~= previous) then
         return false, L.A_TALENT_BUILD_WITH_THIS_NAME_ALREADY_EXISTS_CHOOSE_ANOTHER_NAME
     end
+    if self.unreadableTemplate then return false, L.SAVED_BUILD_UNREADABLE end
+    local snapshot
+    if self.draft.nodes then
+        snapshot = { ranks = {}, choices = {} }
+        for id, rank in pairs(self.draft.ranks) do snapshot.ranks[id] = rank end
+        for id, choice in pairs(self.draft.choices) do snapshot.choices[id] = choice end
+        self.draft.code = self:EncodeDraft(self.draft)
+    end
     if previous and previous ~= name then self.db.templates[previous] = nil end
-    self.db.templates[name] = { code = self.draft.code, spec = self.draft.spec, level = self.draft.level }
+    self.db.templates[name] = { code = self.draft.code, spec = self.draft.spec,
+        level = self.draft.level, allocation = snapshot }
     self.selected = name
     self:ResetDraftBaseline()
     if self.FlashSaved then self:FlashSaved(overwrite) end
@@ -137,27 +144,41 @@ end
 function T:LoadTemplate(name)
     local template = self:GetTemplate(name)
     if not template then return false, L.TALENT_BUILD_NOT_FOUND end
-    local ok, err = self:ImportCode(template.code, template.level)
-    if ok then
-        self.selected = name; self.dirty = false
-        if self.panel then self.panel.name:SetText(name ~= self.currentBuildKey and self:TemplateName(name) or "") end
+    local ok, err = self:ImportCode(template.code, template.level, name ~= self.currentBuildKey)
+    if not ok and name ~= self.currentBuildKey and type(template.allocation) == "table"
+        and type(template.allocation.ranks) == "table" and self:ClassForSpec(template.spec) then
+        local tree = C_ClassTalents.GetTraitTreeForSpec(template.spec)
+        if tree then
+            self.draft = { code = template.code, spec = template.spec, tree = tree, level = 60,
+                content = {}, recoverSaved = true, recoveryWarning = true }
+            self.newSpec = template.spec
+            ok = true
+        end
     end
-    return ok, err
+    self.selected = name
+    self.unreadableTemplate = not ok and name or nil
+    self.dirty = false
+    if ok then self.draft.savedAllocation = template.allocation end
+    if self.panel then self.panel.name:SetText(name ~= self.currentBuildKey and self:TemplateName(name) or "") end
+    return ok, ok and err or L.SAVED_BUILD_UNREADABLE
 end
 
 function T:DeleteTemplate(name)
     if name == self.currentBuildKey then return false, L.CURRENT_TALENTS_CANNOT_BE_DELETED end
     if not self.db.templates[name] then return false, L.TALENT_BUILD_NOT_FOUND end
-    if InCombatLockdown() then return false, L.EDIT_THE_TALENT_BUILD_AFTER_COMBAT end
-    -- Load the player's own talents before dropping the saved build.
-    local ok, err = self:CaptureCurrent()
-    if not ok then return false, err end
+    -- Deletion never depends on successfully decoding this or another build.
     self.db.templates[name] = nil
+    if self.selected == name then
+        self.selected = nil
+        self.unreadableTemplate = nil
+        self.dirty = false
+        pcall(self.CaptureCurrent, self)
+    end
     return true, L.TALENT_BUILD_DELETED
 end
 
 -- Build strings are the game's own serialization, not WotLK's class/index codes.
-function T:DecodeCode(text)
+function T:DecodeCode(text, recoverSaved)
     text = (text or ""):gsub("%s+", "")
     if text == "" or #text > 16000 or text:find("[^%w+/=]") then
         return nil, L.PASTE_A_TALENT_CODE_FROM_WOW_FOREVER
@@ -172,22 +193,25 @@ function T:DecodeCode(text)
     if not self:ClassForSpec(spec) then return nil, L.THIS_IS_NOT_A_WOW_FOREVER_CLASS_TALENT_BUILD end
     local tree = C_ClassTalents.GetTraitTreeForSpec(spec)
     if not tree then return nil, L.THIS_CLASS_S_TALENT_DATA_IS_UNAVAILABLE end
-    if stream:GetNumberOfBits() < frame.bitWidthHeaderVersion + frame.bitWidthSpecID + 128 + #C_Traits.GetTreeNodes(tree) then
+    if not recoverSaved and stream:GetNumberOfBits() < frame.bitWidthHeaderVersion + frame.bitWidthSpecID + 128 + #C_Traits.GetTreeNodes(tree) then
         return nil, L.THE_TALENT_CODE_IS_INCOMPLETE
     end
-    if not frame:IsHashEmpty(hash) and not frame:HashEquals(hash, C_Traits.GetTreeHash(tree)) then
+    local outdated = not frame:IsHashEmpty(hash) and not frame:HashEquals(hash, C_Traits.GetTreeHash(tree))
+    if outdated and not recoverSaved then
         return nil, L.THE_TALENT_TREE_HAS_CHANGED_EXPORT_THIS_TALENT_BUILD_AGAIN
     end
     local content = frame:ReadLoadoutContent(stream, tree)
-    return { code = text, spec = spec, tree = tree, content = content, level = 60 }
+    return { code = text, spec = spec, tree = tree, content = content, level = 60,
+        recoverSaved = recoverSaved == true, recoveryWarning = outdated }
 end
 
-function T:ImportCode(text, level)
-    local callOK, draft, err = pcall(self.DecodeCode, self, text)
+function T:ImportCode(text, level, recoverSaved)
+    local callOK, draft, err = pcall(self.DecodeCode, self, text, recoverSaved)
     if not callOK then return false, L.INVALID_TALENT_CODE_OR_UNAVAILABLE_TALENT_DATA end
     if not draft then return false, err end
     draft.level = 60
     self.draft = draft
+    self.unreadableTemplate = nil
     self.newSpec = draft.spec
     self.selected = nil
     self:ResetDraftBaseline()
@@ -239,11 +263,31 @@ function T:ReadDraftNodes()
         local entry = draft.content[i]
         local rank = entry and entry.isNodeSelected and not entry.isNodeGranted
             and (entry.isPartiallyRanked and entry.partialRanksPurchased or node.maxRanks) or 0
-        if type(rank) ~= "number" or rank < 0 or rank > node.maxRanks then error(L.INVALID_TALENT_RANK) end
+        if type(rank) ~= "number" or rank < 0 then error(L.INVALID_TALENT_RANK) end
+        if rank > node.maxRanks then
+            if not draft.recoverSaved then error(L.INVALID_TALENT_RANK) end
+            draft.recoveryWarning = true
+        end
         local index = entry and entry.choiceNodeSelection or 1
-        if rank > 0 and not node.entryIDs[index] then error(L.INVALID_TALENT_SELECTION) end
+        if rank > 0 and not node.entryIDs[index] then
+            if not draft.recoverSaved then error(L.INVALID_TALENT_SELECTION) end
+            draft.recoveryWarning = true
+            index = 1
+        end
         draft.ranks[id] = rank
         draft.choices[id] = index
+    end
+    if draft.recoverSaved and draft.recoveryWarning and type(draft.savedAllocation) == "table" then
+        local saved = draft.savedAllocation
+        if type(saved.ranks) == "table" then
+            for id in pairs(draft.ranks) do
+                local rank = saved.ranks[id]
+                draft.ranks[id] = type(rank) == "number" and rank >= 0 and rank % 1 == 0
+                    and rank < 2 ^ self:GetNativeFrame().bitWidthRanksPurchased and rank or 0
+                local choice = type(saved.choices) == "table" and saved.choices[id]
+                draft.choices[id] = draft.nodes[id].entryIDs[choice or 1] and (choice or 1) or 1
+            end
+        end
     end
     draft.planTrees = nil
 end
@@ -255,7 +299,8 @@ function T:PointCount()
 end
 
 function T:ChangeRank(id, delta)
-    if InCombatLockdown() or not self.planning or not self.draft or not self.draft.nodes then return end
+    if self.unreadableTemplate then return end
+    if not self.planning or not self.draft or not self.draft.nodes then return end
     local draft = self.draft
     local node = draft.nodes[id]
     if not node then return end
@@ -272,10 +317,11 @@ function T:ChangeRank(id, delta)
         self:Message(L.TALENT_LOCKED_SPEND_POINTS_IN_EARLIER_ROWS_AND_MEET_THE_PREREQUISITE, false)
         return
     end
+    local wasValid = self:IsPlanValid()
     local previousRanks = {}
     for nodeID, previous in pairs(draft.ranks) do previousRanks[nodeID] = previous end
     draft.ranks[id] = rank
-    if delta < 0 and not self:IsPlanValid() then
+    if delta < 0 and wasValid and not self:IsPlanValid() then
         draft.ranks = previousRanks
         self:Message(L.REMOVE_DEPENDENT_TALENTS_FIRST, false)
         return

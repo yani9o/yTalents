@@ -2,6 +2,24 @@
 -- Keep internal IDs, commands and saved values out of translated UI text.
 local _, addon = ...
 local terms = {
+    ["SAVED_BUILD_RECOVERED"] = {
+        enUS = "Outdated build opened for repair. Check talent assignments, ranks and prerequisites before saving.",
+        deDE = "Veralteter Build zur Bearbeitung geöffnet. Bitte Talentzuordnung, Ränge und Voraussetzungen vor dem Speichern prüfen.",
+    },
+    ["SAVED_BUILD_UNREADABLE"] = {
+        enUS = "This saved build cannot be decoded. It is selected for deletion; the displayed tree is not this build.",
+        deDE = "Dieser gespeicherte Build kann nicht gelesen werden. Er ist zum Löschen ausgewählt; der angezeigte Baum gehört nicht zu diesem Build.",
+    },
+    ["REPAIR_BUILD_BEFORE_LEARNING"] = {
+        enUS = "Fix invalid ranks, point totals and talent prerequisites before learning this build.",
+        deDE = "Bitte ungültige Ränge, Punktzahlen und Talentvoraussetzungen vor dem Erlernen korrigieren.",
+    },
+    ["APPLY_LIVE_TALENTS"] = { enUS = "Apply changes", deDE = "Änderungen anwenden" },
+    ["UNDO_LIVE_TALENTS"] = { enUS = "Undo", deDE = "Rückgängig" },
+    ["SPEC_GROUP_VIEW"] = {
+        enUS = "Learned talents",
+        deDE = "Erlernte Talente",
+    },
     ["PLANNER_SPELL_ID"] = {
         enUS = "Spell ID:",
         deDE = "Zauber-ID:",
@@ -18,10 +36,6 @@ local terms = {
         enUS = "Talents:",
         deDE = "Talente:",
     },
-    ["PLANNER_COUNTER_REMAINING_LABEL"] = {
-        enUS = "Remaining:",
-        deDE = "Verbleibend:",
-    },
     ["PLANNER_COUNTER_TITLE"] = {
         enUS = "Talent points",
         deDE = "Talentpunkte",
@@ -33,18 +47,6 @@ local terms = {
     ["PLANNER_NEXT_RANK"] = {
         enUS = "Next rank:",
         deDE = "Nächster Rang:",
-    },
-    ["PLANNER_POINTS_USED"] = {
-        enUS = "Talent points: %d/51",
-        deDE = "Talentpunkte: %d/51",
-    },
-    ["PLANNER_POINTS_REMAINING"] = {
-        enUS = "Remaining: %d",
-        deDE = "Verbleibend: %d",
-    },
-    ["PLANNER_REQUIRED_LEVEL"] = {
-        enUS = "Required level: %d",
-        deDE = "Benötigte Stufe: %d",
     },
     ["CURRENT_TALENTS"] = {
         enUS = "Current talents",
@@ -158,10 +160,6 @@ local terms = {
         enUS = "Open yTalents",
         deDE = "yTalents öffnen",
     },
-    ["PLANNING_PAUSES_DURING_COMBAT_YOUR_TALENT_BUILD_IS_PRESERVED"] = {
-        enUS = "Combat: plan saved",
-        deDE = "Kampf: Plan bleibt erhalten",
-    },
     ["YES"] = {
         enUS = "Yes",
         deDE = "Ja",
@@ -201,10 +199,6 @@ local terms = {
     ["SELECT_A_CLASS_FOR_A_NEW_LEVEL_60_TALENT_BUILD"] = {
         enUS = "Change class in the talent planner",
         deDE = "Klasse im Talentplaner ändern",
-    },
-    ["SELECT_THE_CLASS_AFTER_COMBAT"] = {
-        enUS = "Available after combat",
-        deDE = "Nach dem Kampf verfügbar",
     },
     ["SAVED_TALENT_BUILDS"] = {
         enUS = "Saved talent builds",
@@ -338,10 +332,6 @@ local terms = {
         enUS = "Saved talent builds are available to all characters on this account.\nPlanning does not spend your character's talent points.\nPrepare a talent build and confirm it with Apply in the game.\n\nCommands: /ytalents or /ytools talents",
         deDE = "Gespeicherte Talentbuilds stehen allen Charakteren dieses Accounts zur Verfügung.\nDie Planung verbraucht keine Talentpunkte deines Charakters.\nBereite einen Talentbuild vor und bestätige ihn im Spiel mit „Anwenden“.\n\nBefehle: /ytalents oder /ytools talents",
     },
-    ["OPEN_ADDON"] = {
-        enUS = "Open %s",
-        deDE = "%s öffnen",
-    },
     ["OPEN_TALENT_PLANNER"] = {
         enUS = "Open talent planner",
         deDE = "Talentplaner öffnen",
@@ -357,18 +347,6 @@ local terms = {
     ["THIS_ADDON_REQUIRES_WOW_FOREVER_S_TALENT_WINDOW"] = {
         enUS = "Forever client required",
         deDE = "Forever-Client benötigt",
-    },
-    ["TALENT_PLANNING_IS_UNAVAILABLE_DURING_COMBAT"] = {
-        enUS = "Talent planner is not available during combat.",
-        deDE = "Der Talentplaner ist während des Kampfes nicht verfügbar.",
-    },
-    ["THE_GAME_COULD_NOT_DISPLAY_THIS_TALENT_BUILD"] = {
-        enUS = "The game could not display this talent build.",
-        deDE = "Das Spiel konnte diesen Talentbuild nicht anzeigen.",
-    },
-    ["TALENT_PREVIEW_UNAVAILABLE"] = {
-        enUS = "Talent preview unavailable: ",
-        deDE = "Talentvorschau nicht verfügbar: ",
     },
     ["TALENT_DATA_IS_UNAVAILABLE_OR_THE_TALENT_BUILD_CONTAINS_INVALID_RANKS"] = {
         enUS = "Talent data unavailable",
@@ -414,17 +392,9 @@ local terms = {
         enUS = "Invalid talent build",
         deDE = "Ungültiger Talentbuild",
     },
-    ["IMPORT_YOUR_CURRENT_TALENTS_AFTER_COMBAT"] = {
-        enUS = "Available after combat",
-        deDE = "Nach dem Kampf verfügbar",
-    },
     ["YOUR_TALENT_DATA_IS_NOT_AVAILABLE_YET_APPLY_OR_DISCARD_PENDING_TALENT_CHANGES_FIRST"] = {
         enUS = "Apply / undo changes first",
         deDE = "Änderungen anwenden / verwerfen",
-    },
-    ["CREATE_THE_TALENT_BUILD_AFTER_COMBAT"] = {
-        enUS = "Available after combat",
-        deDE = "Nach dem Kampf verfügbar",
     },
     ["THIS_CLASS_S_TALENT_TREE_IS_UNAVAILABLE"] = {
         enUS = "Talent tree unavailable",
@@ -433,14 +403,6 @@ local terms = {
     ["THIS_CLASS_S_TALENT_DATA_IS_NOT_AVAILABLE_YET"] = {
         enUS = "Talent data unavailable",
         deDE = "Talentdaten nicht verfügbar",
-    },
-    ["EDIT_THE_TALENT_BUILD_AFTER_COMBAT"] = {
-        enUS = "Available after combat",
-        deDE = "Nach dem Kampf verfügbar",
-    },
-    ["PREPARE_THE_TALENT_BUILD_AFTER_COMBAT"] = {
-        enUS = "Available after combat",
-        deDE = "Nach dem Kampf verfügbar",
     },
     ["YOU_CAN_ONLY_LEARN_TALENTS_FOR_YOUR_OWN_CLASS"] = {
         enUS = "Only your own class",
@@ -482,10 +444,6 @@ local terms = {
         enUS = "Talent tree ",
         deDE = "Talentbaum ",
     },
-    ["RESET_TALENT_TREES_AFTER_COMBAT"] = {
-        enUS = "Available after combat",
-        deDE = "Nach dem Kampf verfügbar",
-    },
     ["THIS_TALENT_TREE_S_DATA_IS_UNAVAILABLE"] = {
         enUS = "Talent data unavailable",
         deDE = "Talentdaten nicht verfügbar",
@@ -493,10 +451,6 @@ local terms = {
     ["TALENT_PLANNER"] = {
         enUS = "Talent planner",
         deDE = "Talentplaner",
-    },
-    ["OPEN_THE_TALENT_PLANNER_AFTER_COMBAT"] = {
-        enUS = "Available after combat",
-        deDE = "Nach dem Kampf verfügbar",
     },
     ["A_SELECTED_TALENT_FROM_THE_ONLINE_CALCULATOR_NO_LONGER_EXISTS_IN_THE_GAME_UPDATE_THE"] = {
         enUS = "Talent outdated in calculator",
@@ -521,10 +475,6 @@ local terms = {
     ["THIS_TALENT_CALCULATOR_LINK_CONTAINS_NO_USABLE_TALENT_BUILD"] = {
         enUS = "Link contains no build",
         deDE = "Link enthält keinen Build",
-    },
-    ["IMPORT_TALENT_BUILDS_AFTER_COMBAT"] = {
-        enUS = "Available after combat",
-        deDE = "Nach dem Kampf verfügbar",
     },
     ["TALENT_DATA_IS_UNAVAILABLE_TRY_AGAIN"] = {
         enUS = "Talent data unavailable",
