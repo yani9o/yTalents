@@ -44,11 +44,11 @@ StaticPopupDialogs.TALENTED_FOREVER_SHARE = {
     end,
     OnAccept = function(dialog, data)
         local edit = dialog.editBox or dialog.EditBox
-        T:SendBuildWhisper(data.link, edit:GetText())
+        T:SendBuildWhisper(data.share, edit:GetText())
     end,
     EditBoxOnEnterPressed = function(edit)
         local dialog = edit:GetParent()
-        if T:SendBuildWhisper(dialog.data.link, edit:GetText()) then dialog:Hide() end
+        if T:SendBuildWhisper(dialog.data.share, edit:GetText()) then dialog:Hide() end
     end,
 }
 
@@ -68,8 +68,8 @@ function T:ImportFromField()
 end
 
 function T:CopyBuildText()
-    local text = self:GetExportText()
-    if not text or text == "" then self:Message(L.OPEN_A_TALENT_BUILD_FIRST, false); return end
+    local text, err = self:GetExportText()
+    if not text or text == "" then self:Message(err or L.OPEN_A_TALENT_BUILD_FIRST, false); return end
     self.panel.code:SetText(text)
     -- Clipboard writes are Blizzard-only. Select everything for the user's Ctrl+C.
     self.panel.code:SetFocus()
@@ -106,7 +106,17 @@ function T:RefreshPanel()
         panel.name:SetText(self.selected ~= self.currentBuildKey and (self:TemplateName(self.selected) or "") or "")
         panel.displayedSelection, panel.displayedSpec = self.selected, draft and draft.spec
     end
-    if not panel.code:HasFocus() then panel.code:SetText((draft and self:GetExportText()) or "") end
+    local signature = draft and ((draft.code or "") .. ":" .. (self.exportFormat or "native"))
+    if not panel.code:HasFocus() or panel.exportSignature ~= signature then
+        local text, err = self:GetExportText()
+        if not text and draft then
+            text = self:GetExportText("wowhead")
+            if panel.exportError ~= err then self:Message(err, false) end
+        end
+        panel.exportError = err
+        panel.exportSignature = signature
+        panel.code:SetText(text or "")
+    end
     self:RefreshActionButtons()
     self:RefreshSavedIndicator()
     if panel.pointSummary then

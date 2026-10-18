@@ -258,44 +258,119 @@ function T:CharacterFullName(unit)
     return rawName
 end
 
-function T:GetBuildChatLink()
-    if not self.draft then return nil, L.OPEN_A_TALENT_BUILD_FIRST end
+function T:GetBuildShareCaption()
     local name = self:TemplateName(self.selected)
     if self.selected == self.currentBuildKey then
         name = L.TALENT_BUILD_FROM .. (self:CharacterFullName("player") or L.CHARACTER)
     elseif not name then
         name = self.panel and self.panel.name:GetText():match("%S") and self.panel.name:GetText() or L.UNSAVED_TALENT_BUILD
     end
-    local caption = "[yTalents: " .. CleanCaption(self:ClassName(self.draft.spec)) .. " - " .. CleanCaption(name) .. "]"
-    -- Plain transport survives Forever's server-side hyperlink stripping.
-    return caption .. " {yTalents:" .. self.draft.spec .. ":" .. self.draft.code .. "}"
+    local counts, trees = {}, self:GetPlanTrees()
+    for index = 1, 3 do
+        local points = 0
+        for _, entry in ipairs(trees[index] or {}) do points = points + (self.draft.ranks[entry.id] or 0) end
+        counts[index] = points
+    end
+    return "yTalents: " .. CleanCaption(self:ClassName(self.draft.spec)) .. " - " .. CleanCaption(name)
+        .. " (" .. table.concat(counts, "/") .. ")"
 end
 
-function T:SendBuildWhisper(link, recipient)
-    recipient = (recipient or ""):match("^%s*(.-)%s*$"):gsub(" +", " ")
-    if recipient == "" or recipient:find("[|%c]") then
-        self:Message(L.ENTER_THE_CHARACTER_S_FIRST_AND_LAST_NAME, false)
-        return false
-    end
-    if #link > 255 then
+function T:GetBuildChatLink()
+    if not self.draft then return nil, L.OPEN_A_TALENT_BUILD_FIRST end
+    return "[" .. self:GetBuildShareCaption() .. "] {yTalents:" .. self.draft.spec .. ":" .. self.draft.code .. "}"
+end
+
+function T:GetBuildShareData()
+    local link, err = self:GetBuildChatLink()
+    if not link then return nil, err end
+    local url = self:GetExportText("tf")
+    if not url or url == "" then url = self:GetExportText("wowhead") end
+    if not url or url == "" then return nil, L.TALENT_DATA_IS_UNAVAILABLE_TRY_AGAIN end
+    return { link = link, fallback = self:GetBuildShareCaption() .. ": " .. url }
+end
+
+local sharePrefix = "yTalentsShare1"
+local shareRequests, shareSequence = {}, 0
+local function ShareRecipientKey(name)
+    return name:lower():gsub(" +", " ")
+end
+
+function T:SendSharedBuildText(text, recipient)
+    if #text > 255 then
         self:Message(L.THE_TALENT_BUILD_LINK_IS_TOO_LONG_TO_WHISPER_USE_A_SHORTER_NAME, false)
         return false
     end
     local send = C_ChatInfo and C_ChatInfo.SendChatMessage or SendChatMessage
     if not send then self:Message(L.WHISPERING_IS_UNAVAILABLE_IN_THIS_GAME_CLIENT, false); return false end
-    local ok = pcall(send, link, "WHISPER", nil, recipient)
+    local ok = pcall(send, text, "WHISPER", nil, recipient)
     self:Message(ok and L.TALENT_BUILD_LINK_SENT or L.THE_TALENT_BUILD_LINK_COULD_NOT_BE_SENT, ok)
     return ok
 end
 
+function T:SendBuildWhisper(data, recipient)
+    recipient = (recipient or ""):match("^%s*(.-)%s*$"):gsub(" +", " ")
+    if recipient == "" or recipient:find("[|%c]") then
+        self:Message(L.ENTER_THE_CHARACTER_S_FIRST_AND_LAST_NAME, false)
+        return false
+    end
+    if type(data) ~= "table" then return false end
+    if not C_ChatInfo or not C_ChatInfo.SendAddonMessage or not self.shareProtocolReady then
+        return self:SendSharedBuildText(data.fallback, recipient)
+    end
+    shareSequence = shareSequence + 1
+    local nonce = tostring(math.floor(GetTime() * 1000)) .. tostring(shareSequence)
+    local request = { recipient = recipient, data = data }
+    shareRequests[nonce] = request
+    local function Finish(hasAddon)
+        if shareRequests[nonce] ~= request then return end
+        shareRequests[nonce] = nil
+        self:SendSharedBuildText(hasAddon and data.link or data.fallback, recipient)
+    end
+    request.finish = Finish
+    local ok = pcall(C_ChatInfo.SendAddonMessage, sharePrefix, "Q:" .. nonce, "WHISPER", recipient)
+    if not ok then Finish(false); return true end
+    -- Silence is inconclusive (offline, old addon, blocked channel). A normal
+    -- web link remains useful in every case and exposes no addon-only code.
+    C_Timer.After(3, function() Finish(false) end)
+    return true
+end
+
+local shareEvents = CreateFrame("Frame")
+shareEvents:RegisterEvent("PLAYER_LOGIN")
+shareEvents:RegisterEvent("CHAT_MSG_ADDON")
+shareEvents:SetScript("OnEvent", function(_, event, prefix, message, channel, sender)
+    if event == "PLAYER_LOGIN" then
+        if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
+            T.shareProtocolReady = C_ChatInfo.RegisterAddonMessagePrefix(sharePrefix)
+        end
+        return
+    end
+    if prefix ~= sharePrefix or channel ~= "WHISPER" or type(sender) ~= "string" or type(message) ~= "string" then return end
+    local kind, nonce = message:match("^([QA]):(%d+)$")
+    if not nonce then return end
+    if kind == "Q" then
+        if T.db and T.db.enabled and C_ChatInfo and C_ChatInfo.SendAddonMessage then
+            pcall(C_ChatInfo.SendAddonMessage, sharePrefix, "A:" .. nonce, "WHISPER", sender)
+        end
+    else
+        local request = shareRequests[nonce]
+        if request then
+            local key = ShareRecipientKey(sender)
+            local expected = ShareRecipientKey(request.recipient)
+            local realm = GetNormalizedRealmName and GetNormalizedRealmName()
+            if key == expected or (realm and key == expected .. "-" .. realm:lower()) then request.finish(true) end
+        end
+    end
+end)
+
 function T:ShareBuild()
-    local link, err = self:GetBuildChatLink()
-    if not link then self:Message(err, false); return end
+    local data, err = self:GetBuildShareData()
+    if not data then self:Message(err, false); return end
     if UnitIsPlayer("target") and UnitIsFriend("player", "target") then
         local name = self:CharacterFullName("target")
-        if name and name ~= "" then self:SendBuildWhisper(link, name); return end
+        if name and name ~= "" then self:SendBuildWhisper(data, name); return end
     end
-    StaticPopup_Show("TALENTED_FOREVER_SHARE", nil, nil, { link = link })
+    StaticPopup_Show("TALENTED_FOREVER_SHARE", nil, nil, { share = data })
 end
 
 function T:LinkifyBuildMessage(message)
@@ -346,6 +421,7 @@ function T:OpenBuildLink(link, text)
     end
     local name = type(text) == "string" and text:match("%[yTalents: .- %- (.-)%]") or nil
     self.inspectionRequest = nil
+    if name then name = name:gsub(" %(%d+/%d+/%d+%)$", "") end
     self:OpenExternalBuild(code, name and CleanCaption(name))
 end
 
