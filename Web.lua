@@ -15,26 +15,11 @@ local function Split(text, separator)
     return result
 end
 
--- Talents Forever v7 (build 70425): ordered positions, matched to the
--- displayed live tree rather than obsolete calculator node IDs.
-local tfLayout = {["warrior"]={{{0,0},{0,1},{0,2},{1,0},{1,1},{1,3},{2,1},{2,2},{3,0},{3,1},{3,2},{4,0},{4,1},{4,2},{5,0},{5,2},{6,1}},{{0,1},{0,2},{1,1},{1,2},{2,0},{2,1},{2,2},{3,0},{3,1},{3,2},{3,3},{4,0},{4,1},{4,3},{5,1},{5,2},{6,1}},{{0,0},{0,1},{0,2},{1,0},{1,2},{1,3},{2,0},{2,1},{2,2},{2,3},{3,0},{3,1},{3,2},{4,0},{4,1},{4,2},{5,2},{6,1}}},["paladin"]={{{0,1},{0,2},{1,0},{1,1},{1,2},{1,3},{2,0},{2,1},{2,2},{3,0},{3,1},{3,2},{4,0},{4,1},{4,2},{5,2},{6,1}},{{0,1},{0,2},{1,0},{1,1},{1,3},{2,0},{2,1},{2,2},{2,3},{3,0},{3,1},{3,2},{4,1},{4,2},{5,2},{6,1}},{{0,1},{0,2},{1,0},{1,1},{1,2},{2,0},{2,1},{2,2},{2,3},{3,0},{3,2},{4,0},{4,1},{4,2},{5,1},{5,2},{6,1}}},["hunter"]={{{0,1},{0,2},{1,0},{1,1},{1,2},{1,3},{2,1},{2,2},{3,0},{3,2},{3,3},{4,0},{4,1},{4,3},{5,2},{6,1}},{{0,0},{0,1},{0,2},{1,0},{1,1},{1,2},{2,0},{2,1},{2,3},{3,1},{3,2},{4,0},{4,2},{4,3},{5,2},{6,1}},{{0,1},{0,2},{1,0},{1,1},{1,2},{1,3},{2,0},{2,1},{2,2},{3,0},{3,1},{3,2},{4,0},{4,1},{4,2},{4,3},{5,2},{6,1}}},["rogue"]={{{0,0},{0,1},{0,2},{1,0},{1,1},{1,3},{2,0},{2,1},{2,2},{3,0},{3,1},{3,2},{4,0},{4,1},{4,2},{5,2},{6,1}},{{0,0},{0,1},{0,2},{1,0},{1,1},{1,2},{2,0},{2,1},{2,3},{3,0},{3,1},{3,2},{4,1},{4,2},{5,1},{5,2},{6,1}},{{0,0},{0,1},{0,2},{1,0},{1,1},{1,2},{1,3},{2,0},{2,1},{2,2},{3,0},{3,1},{3,2},{4,0},{4,1},{4,2},{5,0},{5,2},{6,1}}},["priest"]={{{0,0},{0,1},{0,2},{1,0},{1,1},{1,2},{1,3},{2,0},{2,1},{2,2},{2,3},{3,0},{3,1},{3,2},{4,1},{4,2},{5,2},{6,1}},{{0,0},{0,1},{0,2},{1,1},{1,2},{2,0},{2,1},{2,3},{3,0},{3,1},{3,2},{3,3},{4,0},{4,1},{4,2},{5,2},{6,1}},{{0,0},{0,1},{0,2},{1,0},{1,2},{1,3},{2,1},{2,2},{2,3},{3,0},{3,1},{3,2},{4,0},{4,2},{5,0},{5,2},{6,1}}},["shaman"]={{{0,1},{0,2},{1,0},{1,1},{1,2},{1,3},{2,0},{2,1},{3,0},{3,1},{3,3},{4,0},{4,1},{4,2},{5,2},{6,1}},{{0,0},{0,1},{0,2},{1,0},{1,1},{1,2},{1,3},{2,0},{2,2},{2,3},{3,0},{3,1},{3,2},{4,0},{4,1},{4,2},{5,2},{6,1}},{{0,1},{0,2},{1,0},{1,1},{1,2},{1,3},{2,0},{2,1},{2,2},{3,0},{3,1},{3,2},{4,1},{4,2},{5,2},{6,1}}},["mage"]={{{0,0},{0,1},{0,2},{0,3},{1,0},{1,1},{1,2},{1,3},{2,0},{2,1},{2,3},{3,0},{3,1},{3,2},{3,3},{4,1},{4,2},{5,2},{6,1}},{{0,0},{0,1},{0,2},{1,0},{1,1},{1,2},{2,0},{2,1},{2,2},{3,0},{3,1},{3,2},{3,3},{4,1},{4,2},{5,2},{6,1}},{{0,0},{0,1},{0,2},{1,0},{1,1},{1,2},{1,3},{2,0},{2,1},{2,2},{2,3},{3,0},{3,1},{3,3},{4,0},{4,1},{4,2},{5,2},{6,1}}},["warlock"]={{{0,0},{0,1},{0,2},{1,0},{1,1},{1,2},{2,0},{2,1},{2,2},{2,3},{3,0},{3,1},{3,2},{4,1},{4,2},{5,2},{6,1}},{{0,0},{0,1},{0,2},{0,3},{1,0},{1,1},{1,2},{1,3},{2,0},{2,1},{2,2},{3,0},{3,2},{3,3},{4,0},{4,1},{4,2},{5,2},{6,1}},{{0,0},{0,1},{0,2},{1,0},{1,1},{1,2},{2,1},{2,2},{3,0},{3,1},{3,2},{4,0},{4,1},{4,2},{5,2},{6,1}}},["druid"]={{{0,1},{0,2},{1,0},{1,1},{1,2},{1,3},{2,0},{2,2},{3,0},{3,1},{3,2},{4,0},{4,1},{4,2},{5,1},{6,1}},{{0,1},{0,2},{1,0},{1,1},{1,2},{1,3},{2,0},{2,1},{2,2},{2,3},{3,0},{3,1},{3,2},{3,3},{4,0},{4,1},{4,3},{5,0},{5,2},{6,1}},{{0,1},{0,2},{1,0},{1,1},{1,2},{2,1},{2,2},{2,3},{3,1},{3,2},{3,3},{4,0},{4,1},{4,3},{5,2},{6,1}}}}
-
+-- Use each website's published order; it can differ from the in-game grid.
 function T:GetCurrentWebMapping()
     local class = self.draft and self:ClassForSpec(self.draft.spec)
-    local layout = class and tfLayout[class.token:lower()]
-    if not layout then return nil end
-    local trees, mapping = self:GetPlanTrees(), {}
-    for index, positions in ipairs(layout) do
-        mapping[index] = {}
-        for _, pos in ipairs(positions) do
-            local found
-            for _, entry in ipairs(trees[index] or {}) do
-                if entry.row == pos[1] and entry.col == pos[2] then found = entry; break end
-            end
-            mapping[index][#mapping[index] + 1] = found or { id = -1 }
-        end
-    end
-    return mapping
+    local data = class and self.webData[class.token:lower()]
+    return data and data.tfCurrent
 end
 
 function T:SpecForSlug(slug)
@@ -128,13 +113,19 @@ function T:ImportText(text)
     if format == "tf" then
         local segments = Split(allocation, "-")
         local last, version = tonumber(segments[#segments]), 1
-        if #segments > 3 and last and last >= 2 and last <= 7 then version = last end
-        mapping = version == 7 and self:GetCurrentWebMapping() or (version == 6 and data.tf or data.old[version == 2 and 3 or version])
+        if #segments > 3 and last and last >= 2 then version = last end
+        mapping = version == (self.talentsForeverVersion or 12) and self:GetCurrentWebMapping()
+            or (data.tfVersions and data.tfVersions[version])
+            or (version <= 6 and (version == 6 and data.tf or data.old[version == 2 and 3 or version]))
         if not mapping then ok, err = false, L.THIS_VERSION_OF_THE_ONLINE_CALCULATOR_IS_UNSUPPORTED else ok, err = self:ApplyDigitTrees({ segments[1], segments[2], segments[3] }, mapping) end
     elseif format == "wowhead" then
         allocation = allocation:match("^([^_]+)") or ""
-        if allocation:sub(1, 2) ~= "v2" then ok, err = false, L.OPEN_THIS_OLD_WOWHEAD_LINK_ON_THE_WEBSITE_AND_COPY_THE_UPDATED_WOW_FOREVER_LINK
-        else ok, err = self:ApplyDigitTrees(Split(allocation:sub(3), "-"), data.wowhead) end
+        local version = self.wowheadHashVersion or "v2"
+        local prefixLength
+        if allocation:sub(1, #version) == version then prefixLength = #version
+        elseif allocation:sub(1, 2) == "v2" then prefixLength = 2 end
+        if not prefixLength then ok, err = false, L.OPEN_THIS_OLD_WOWHEAD_LINK_ON_THE_WEBSITE_AND_COPY_THE_UPDATED_WOW_FOREVER_LINK
+        else ok, err = self:ApplyDigitTrees(Split(allocation:sub(prefixLength + 1), "-"), data.wowhead) end
     else
         ok = true
         local treeIndex
@@ -145,11 +136,12 @@ function T:ImportText(text)
                 local value = tonumber(char, 36)
                 local row, col = math.floor(value / 4), value % 4
                 local talent
-                for _, entry in ipairs(self:GetPlanTrees()[treeIndex] or {}) do if entry.row == row and entry.col == col then talent = entry; break end end
+                for _, entry in ipairs(data.wt[treeIndex] or {}) do if entry.row == row and entry.col == col then talent = entry; break end end
                 if not talent then ok, err = false, L.UNKNOWN_TALENT_POSITION_IN_THE_WARCRAFT_TAVERN_CALCULATOR; break end
-                local nodeID = self:ResolveWebNode(talent.id)
+                local nodeID = self:ResolveWebNode(talent.id, talent)
                 local rank = nodeID and self.draft.ranks[nodeID] or 0
-                ok, err = self:AssignWebRank(talent.id, rank + 1)
+                if rank >= talent.max then ok, err = false, L.INVALID_TALENT_CODE_FROM_WARCRAFT_TAVERN; break end
+                ok, err = self:AssignWebRank(talent.id, rank + 1, talent)
                 if not ok then break end
             else ok, err = false, L.INVALID_TALENT_CODE_FROM_WARCRAFT_TAVERN; break end
         end
@@ -182,11 +174,6 @@ function T:GetExportText(format)
     end
     local slug = self:ClassForSpec(draft.spec).token:lower()
     local data = self.webData[slug]
-    -- Wowhead accepts Blizzard's full serialization, including newly added
-    -- talents that its separate digit mapping may not yet contain.
-    if format == "wowhead" then
-        return "https://www.wowhead.com/forever/talent-calc/blizzard/" .. draft.code
-    end
     local segments, represented = {}, {}
     if format == "tf" or format == "wowhead" then
         local mapping = format == "tf" and self:GetCurrentWebMapping() or data.wowhead
@@ -197,19 +184,22 @@ function T:GetExportText(format)
                 local id = type(talent) == "table" and talent.id or talent
                 local nodeID = self:ResolveWebNode(id, type(talent) == "table" and talent or nil)
                 if nodeID then represented[nodeID] = true end
-                digits = digits .. tostring(nodeID and draft.ranks[nodeID] or 0)
+                local rank = nodeID and draft.ranks[nodeID] or 0
+                if rank > (talent.max or 5) then return nil, L.A_TALENT_S_MAXIMUM_RANK_IN_THE_ONLINE_CALCULATOR_DIFFERS_FROM_THE_GAME end
+                digits = digits .. tostring(rank)
             end
             segments[#segments + 1] = digits:gsub("0+$", "")
         end
     else
         -- Warcraft Tavern records point-by-point order, not just final ranks.
         local encoded = ""
-        for index, tree in ipairs(self:GetPlanTrees()) do
+        for index, tree in ipairs(data.wt) do
             local owned, targets, byID = {}, {}, {}
             for i, talent in ipairs(tree) do
-                local nodeID = self:ResolveWebNode(talent.id)
+                local nodeID = self:ResolveWebNode(talent.id, talent)
                 if nodeID then represented[nodeID] = true end
                 targets[i], owned[i], byID[talent.id] = nodeID and draft.ranks[nodeID] or 0, 0, i
+                if targets[i] > talent.max then return nil, L.A_TALENT_S_MAXIMUM_RANK_IN_THE_ONLINE_CALCULATOR_DIFFERS_FROM_THE_GAME end
             end
             local added, left = "", 0
             for _, rank in ipairs(targets) do left = left + rank end
@@ -236,7 +226,7 @@ function T:GetExportText(format)
     for id, rank in pairs(draft.ranks or {}) do
         if rank > 0 and not represented[id] then return nil, L.A_SELECTED_TALENT_IS_MISSING_FROM_THIS_ONLINE_CALCULATOR_S_CURRENT_DATA end
     end
-    if format == "tf" then return "https://talentsforever.com/" .. slug .. "/" .. draft.level .. "/" .. table.concat(segments, "-") .. "-7" end
-    if format == "wowhead" then return "https://www.wowhead.com/forever/talent-calc/" .. slug .. "/v2" .. table.concat(segments, "-"):gsub("-+$", "") .. "_t0" end
+    if format == "tf" then return "https://talentsforever.com/" .. slug .. "/" .. draft.level .. "/" .. table.concat(segments, "-") .. "-" .. (self.talentsForeverVersion or 12) end
+    if format == "wowhead" then return "https://www.wowhead.com/forever/talent-calc/" .. slug .. "/" .. (self.wowheadHashVersion or "v2") .. table.concat(segments, "-"):gsub("-+$", "") .. "_t0" end
     return "https://www.warcrafttavern.com/forever/tools/talent-calculator/" .. slug .. "#?t=" .. segments[1]
 end

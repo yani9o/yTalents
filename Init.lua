@@ -125,8 +125,14 @@ loader:SetScript("OnEvent", function(_, event, name, action)
         C_Timer.After(0, function() if T.db and T.db.enabled then T:PrepareReplacement(); T:QueueCurrentTalentsSync() end end)
     elseif event == "PLAYER_LEVEL_UP" or event == "UPDATE_BINDINGS" or event == "PLAYER_ENTERING_WORLD" then
         C_Timer.After(0, function() T:UpdateTalentKeyBindings(); if T.db and T.db.enabled then T:PrepareReplacement() end end)
+        if event == "PLAYER_ENTERING_WORLD" then
+            C_Timer.After(0.1, function()
+                if T.db and T.db.enabled then T:RefreshTalentIconsAfterLoading() end
+            end)
+        end
     elseif event == "CONFIG_COMMIT_FAILED" then
         T.liveCommitPending = nil
+        T.liveCommitNodes = nil
         if T.db and T.db.enabled then
             T:Message(L.THE_GAME_REJECTED_THE_TALENT_BUILD, false, true)
             T:CacheLiveSpecs(); if T.specGroupView then T:ShowLiveTalents() end
@@ -138,10 +144,27 @@ loader:SetScript("OnEvent", function(_, event, name, action)
         if T.db and T.db.enabled then
             T:UpdateTalentKeyBindings()
             local config = C_ClassTalents.GetActiveConfigID()
-            if config and not C_Traits.ConfigHasStagedChanges(config) then T.liveCommitPending = nil end
+            local applied = event == "TRAIT_CONFIG_UPDATED" and name == T.liveCommitPending
+                and config == name and not C_Traits.ConfigHasStagedChanges(config)
+            local appliedNodes = applied and T.liveCommitNodes
+            if applied then
+                T.liveCommitPending = nil
+                T.liveCommitNodes = nil
+            elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
+                T.liveCommitPending = nil
+                T.liveCommitNodes = nil
+            end
             T:CacheLiveSpecs()
             if T.specGroupView and T.plannerWindow and T.plannerWindow:IsShown() then T:ShowSpecGroup(T.specGroupView) end
             T:QueueCurrentTalentsSync()
+            if applied then
+                -- Let the committed ranks and button artwork finish refreshing first.
+                C_Timer.After(0, function()
+                    if T.specGroupView and T.draft and T.draft.liveConfigID == config then
+                        T:PlayTalentApplyComplete(appliedNodes)
+                    end
+                end)
+            end
         end
     elseif event == "PLAYER_REGEN_DISABLED" then
         if T.specActionBar then T.specActionBar.apply:SetEnabled(false) end

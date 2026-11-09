@@ -56,8 +56,10 @@ function T:ImportFromField()
     local text = self.panel.code:GetText()
     self.panel.code:ClearFocus()
     self:ConfirmDiscard(function()
+        local selected = self.selected
         local ok, err = self:ImportText(text)
         if ok then
+            self.selected = selected
             -- Web imports already have populated ranks. Native imports have no
             -- nodes yet, so RenderDraft will load those only when necessary.
             ok, err = self:RenderDraft(false)
@@ -185,8 +187,9 @@ function T:ShowStatus(message, success)
     end)
 end
 
-function T:FlashSaved(updated)
+function T:FlashSaved(updated, nodes)
     self:ShowStatus(updated and L.TALENT_BUILD_UPDATED or L.TALENT_BUILD_SAVED, true)
+    self:PlayTalentApplyComplete(nodes)
 end
 
 function T:RefreshSavedIndicator()

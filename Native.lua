@@ -198,6 +198,207 @@ function T:ChangeLiveRank(id, delta)
     self:ShowSpecGroup(active)
 end
 
+function T:PlayTalentWindowBurst(canvas)
+    if not canvas.commitBurst then
+        local effects = { textures = {}, animations = {}, classTextures = {} }
+        -- Atlas artwork can be much larger than the displayed talent area.
+        -- Clip every burst layer, including the two unscaled class layers.
+        local holder = CreateFrame("Frame", nil, canvas)
+        holder:SetAllPoints(canvas.background)
+        holder:SetClipsChildren(true)
+        holder:EnableMouse(false)
+        effects.holder = holder
+        local function CreateMask(atlas)
+            local mask = holder:CreateMaskTexture(nil, "BACKGROUND", nil, 4)
+            mask:SetAtlas(atlas, true)
+            local info = C_Texture.GetAtlasInfo(atlas)
+            if info then
+                -- SetAtlas alone leaves the edges clamped to the last pixel;
+                -- native XML explicitly uses black outside these masks.
+                mask:SetTexture(info.file, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+                mask:SetTexCoord(info.leftTexCoord, info.rightTexCoord, info.topTexCoord, info.bottomTexCoord)
+            end
+            return mask
+        end
+        local mask = CreateMask("talents-animations-mask-full")
+        mask:SetAllPoints(holder)
+        effects.mask = mask
+        local filigree = CreateMask("talents-animations-mask-filigree-activate")
+        filigree:SetPoint("TOPLEFT", holder, "TOPLEFT")
+        effects.filigree = filigree
+
+        local function AddEffect(atlas, alpha, duration, smoothing, fromScale, toScale, scaleDuration)
+            local texture = holder:CreateTexture(nil, "BACKGROUND", nil, 4)
+            texture:SetAtlas(atlas, true)
+            texture:SetPoint("CENTER", holder, "CENTER")
+            texture:SetBlendMode("ADD")
+            texture:SetAlpha(0)
+            texture:SetSnapToPixelGrid(false)
+            texture:SetTexelSnappingBias(0)
+            local animation = texture:CreateAnimationGroup()
+            animation:SetToFinalAlpha(true)
+            local fade = animation:CreateAnimation("Alpha")
+            fade:SetFromAlpha(alpha); fade:SetToAlpha(0)
+            fade:SetDuration(duration); fade:SetSmoothing(smoothing)
+            if fromScale then
+                local scale = animation:CreateAnimation("Scale")
+                scale:SetScaleFrom(fromScale, fromScale)
+                scale:SetScaleTo(toScale, toScale)
+                scale:SetDuration(scaleDuration or duration)
+                if atlas == "talents-animations-gridburst" then scale:SetSmoothing("IN") end
+            end
+            effects.textures[#effects.textures + 1] = texture
+            effects.animations[#effects.animations + 1] = animation
+            return texture
+        end
+
+        -- Match the native frame's expanding grid, class artwork and titan flare.
+        local grid = AddEffect("talents-animations-gridburst", 0.65, 1.4, "IN", 1, 20)
+        grid:SetSize(320, 320)
+        grid:AddMaskTexture(mask)
+        grid:AddMaskTexture(filigree)
+        for i, settings in ipairs({ {1, 1.2}, {1, 1.2}, {0.3, 0.3}, {0.2, 0.5} }) do
+            local texture = AddEffect("talents-animations-class-druid", settings[1], settings[2], "OUT",
+                i > 2 and 1 or nil, i > 2 and 1.5 or nil)
+            texture:AddMaskTexture(mask)
+            effects.classTextures[i] = texture
+        end
+        local titans = AddEffect("talents-animations-titans", 0.7, 1, "IN", 1.3, 1.2, 2)
+        titans:ClearAllPoints()
+        titans:SetPoint("CENTER", holder, "CENTER", 100, -18)
+        titans:AddMaskTexture(mask)
+        canvas.commitBurst = effects
+        canvas:HookScript("OnHide", function()
+            for i, animation in ipairs(effects.animations) do
+                animation:Stop()
+                effects.textures[i]:SetAlpha(0)
+            end
+        end)
+    end
+
+    local effects = canvas.commitBurst
+    local native = self:GetNativeFrame()
+    local nativeWidth, nativeHeight = 1210, 595 -- Camelot ClassBackground bounds.
+    if native and native.ClassBackground then
+        local width, height = native.ClassBackground:GetSize()
+        if width > 0 and height > 0 then nativeWidth, nativeHeight = width, height end
+    end
+    local ratioX = effects.holder:GetWidth() / nativeWidth
+    local ratioY = effects.holder:GetHeight() / nativeHeight
+    local artworkScale = math.min(ratioX, ratioY)
+    local function MatchNativeSize(texture, source, mask)
+        if source then
+            local width, height = source:GetSize()
+            if width > 0 and height > 0 then
+                texture:SetSize(width * (mask and ratioX or artworkScale),
+                    height * (mask and ratioY or artworkScale))
+            end
+        end
+    end
+    -- The corner filigree is a top-left anchored native mask, not a
+    -- background image to contain/cover. Class emblems retain native sizes.
+    MatchNativeSize(effects.filigree, native and native.ActivationExpandFxMask, true)
+    MatchNativeSize(effects.textures[1], native and native.ActivationExpandFx)
+    local class = self.draft and self:ClassForSpec(self.draft.spec)
+    local atlas = class and ("talents-animations-class-" .. class.token:lower())
+    for i, animation in ipairs(effects.animations) do
+        animation:Stop()
+        effects.textures[i]:SetAlpha(0)
+    end
+    local hasClassEffect = atlas and C_Texture.GetAtlasInfo(atlas)
+    for i, texture in ipairs(effects.classTextures) do
+        if hasClassEffect then
+            texture:SetAtlas(atlas, true)
+            local key = "ActivationClassFx" .. (i > 1 and tostring(i) or "")
+            MatchNativeSize(texture, native and native[key])
+        end
+    end
+    MatchNativeSize(effects.textures[#effects.textures], native and native.ActivationTitansFX)
+    for i, animation in ipairs(effects.animations) do
+        if i == 1 or i == #effects.animations or hasClassEffect then animation:Play() end
+    end
+end
+
+function T:PlayTalentApplyComplete(nodes)
+    local canvas = self.plannerCanvas
+    if not canvas or not canvas:IsVisible() then return end
+    if not canvas.commitFlash then
+        -- Match the native talent frame's additive 1.2-second completion flash.
+        local flash = canvas:CreateTexture(nil, "BACKGROUND", nil, 3)
+        flash:SetAllPoints(canvas)
+        flash:SetAtlas("spec-background")
+        flash:SetBlendMode("ADD")
+        flash:SetAlpha(0)
+        local animation = flash:CreateAnimationGroup()
+        animation:SetToFinalAlpha(true)
+        local fade = animation:CreateAnimation("Alpha")
+        fade:SetFromAlpha(1); fade:SetToAlpha(0)
+        fade:SetDuration(1.2); fade:SetSmoothing("IN")
+        canvas.commitFlash, canvas.commitFlashAnim = flash, animation
+        canvas:HookScript("OnHide", function()
+            animation:Stop(); flash:SetAlpha(0)
+        end)
+    end
+    canvas.commitFlashAnim:Stop()
+    canvas.commitFlash:SetAlpha(1)
+    canvas.commitFlashAnim:Play()
+    self:PlayTalentWindowBurst(canvas)
+    if SOUNDKIT and SOUNDKIT.UI_CLASS_TALENT_APPLY_CHANGES then
+        PlaySound(SOUNDKIT.UI_CLASS_TALENT_APPLY_CHANGES)
+    end
+    if not canvas.commitEffects then
+        -- Use our own scene and Blizzard's native talent purchase particles.
+        -- No native talent buttons or protected frame state are modified.
+        local scene = CreateFrame("ModelScene", nil, canvas, "ScriptAnimatedModelSceneTemplate")
+        scene:SetAllPoints(canvas.nodeLayer)
+        scene:SetFrameLevel(canvas.nodeLayer:GetFrameLevel() + 10)
+        scene:EnableMouse(false)
+        canvas.commitEffects = scene
+        canvas:HookScript("OnHide", function()
+            if canvas.commitEffectTimer then
+                canvas.commitEffectTimer:Cancel()
+                canvas.commitEffectTimer = nil
+            end
+            scene:ClearEffects()
+        end)
+    end
+    local scene = canvas.commitEffects
+    if canvas.commitEffectTimer then
+        canvas.commitEffectTimer:Cancel()
+        canvas.commitEffectTimer = nil
+    end
+    scene:ClearEffects()
+    local selected = {}
+    if nodes then
+        for _, id in ipairs(nodes) do selected[id] = true end
+    else
+        -- New plans have no previous saved allocation to compare against.
+        for id, rank in pairs(self.draft and self.draft.ranks or {}) do
+            if rank > 0 then selected[id] = true end
+        end
+    end
+    if not next(selected) then return end
+    local draft, group, selection = self.draft, self.specGroupView, self.selected
+    local spec, code = draft and draft.spec, draft and draft.code
+    -- The window burst leads; newly purchased nodes and the collective
+    -- completion sound follow together after the requested one-second delay.
+    canvas.commitEffectTimer = C_Timer.NewTimer(1, function()
+        canvas.commitEffectTimer = nil
+        if not canvas:IsVisible() or not self.draft or self.draft.spec ~= spec
+            or self.draft.code ~= code or self.specGroupView ~= group or self.selected ~= selection then return end
+        for id in pairs(selected) do
+            local button = canvas.buttons[id]
+            if button and button:IsVisible() then
+                scene:AddEffect(150, button, button, nil, nil,
+                    button:GetEffectiveScale() / scene:GetEffectiveScale())
+            end
+        end
+        if SOUNDKIT and SOUNDKIT.UI_CLASS_TALENT_APPLY_COMPLETE then
+            PlaySound(SOUNDKIT.UI_CLASS_TALENT_APPLY_COMPLETE)
+        end
+    end)
+end
+
 function T:ApplyLiveTalents(undo)
     -- Staging and refunding pending points are allowed; combat commits are blocked.
     if not undo and InCombatLockdown() then return end
@@ -212,9 +413,14 @@ function T:ApplyLiveTalents(undo)
         local canChange, canAdd, reason = C_ClassTalents.CanChangeTalents()
         if not canChange and not canAdd then self:Message(reason, false); return end
         if C_Traits.IsReadyForCommit and not C_Traits.IsReadyForCommit() then return end
-        self.liveCommitPending = true
+        local purchases, _, swaps = C_Traits.GetStagedChanges(config)
+        self.liveCommitNodes = {}
+        for _, id in ipairs(purchases or {}) do self.liveCommitNodes[#self.liveCommitNodes + 1] = id end
+        for _, id in ipairs(swaps or {}) do self.liveCommitNodes[#self.liveCommitNodes + 1] = id end
+        self.liveCommitPending = config
         if C_ClassTalents.CommitConfig() == false then
             self.liveCommitPending = nil
+            self.liveCommitNodes = nil
             self:Message(L.THE_GAME_REJECTED_THE_TALENT_BUILD, false); return
         end
     end
@@ -1058,6 +1264,16 @@ function T:GetPlanTrees()
         end
         table.sort(tree, function(a, b) return a.row == b.row and a.col < b.col or a.row < b.row end)
     end
+    -- An empty native incoming-edge list means no prerequisite. Do not fall
+    -- back to calculator links for these nodes: those can point the other way
+    -- after a talent-tree update.
+    local hasNativeEdges = false
+    for _, node in pairs(draft.nodes) do
+        if type(node.visibleEdges) == "table" then hasNativeEdges = true; break end
+    end
+    if hasNativeEdges then
+        for _, entry in pairs(byID) do entry.prereqs = {} end
+    end
     -- Native availability edges replace stale calculator prerequisites.
     for id, node in pairs(draft.nodes) do
         for _, edge in ipairs(node.visibleEdges or {}) do
@@ -1202,21 +1418,44 @@ function T:GetPlannerTalentInfo(id)
     local draft = self.draft
     local node = draft and draft.nodes[id]
     if not node then return end
-    if draft.talentInfo and draft.talentInfo[id] then return unpack(draft.talentInfo[id]) end
+    local function ValidIcon(icon)
+        return (type(icon) == "number" and icon > 0) or (type(icon) == "string" and icon ~= "")
+    end
+    local saved = draft.talentInfo and draft.talentInfo[id]
+    if saved and ValidIcon(saved[2]) then return unpack(saved) end
     local entryID = node.entryIDs[draft.choices[id] or 1] or node.entryIDs[1]
+    -- Entry metadata is stable across load screens. The view-config cache is not.
+    self.plannerTalentInfo = self.plannerTalentInfo or {}
+    local cached = self.plannerTalentInfo[entryID]
+    if cached then return unpack(cached) end
     local entry = C_Traits.GetEntryInfo(draft.configID, entryID)
     local definition = entry and C_Traits.GetDefinitionInfo(entry.definitionID)
-    if not definition then return end
+    if not definition then
+        if saved and ValidIcon(saved[2]) then return unpack(saved) end
+        return nil, 134400, entryID
+    end
     local spellID = definition.spellID
     local name = definition.overrideName
     if not name or name == "" then name = spellID and C_Spell.GetSpellName(spellID) end
     local icon = definition.overrideIcon
     if (not icon or icon == 0) and spellID then
         local basic, talentIcon = C_Spell.GetSpellTexture(spellID)
-        icon = talentIcon or basic
+        icon = ValidIcon(talentIcon) and talentIcon or basic
     end
     if spellID and C_Spell.RequestLoadSpellData then C_Spell.RequestLoadSpellData(spellID) end
-    return name or L.TALENT_TREE .. id, icon or 134400, entryID, spellID
+    if name and name ~= "" and ValidIcon(icon) then
+        self.plannerTalentInfo[entryID] = {name, icon, entryID, spellID}
+    end
+    return name or L.TALENT_TREE .. id, ValidIcon(icon) and icon or 134400, entryID, spellID
+end
+
+function T:RefreshTalentIconsAfterLoading()
+    local draft = self.draft
+    if not draft or not self.plannerCanvas or not self.plannerCanvas:IsShown() then return end
+    if not draft.liveConfigID then
+        C_ClassTalents.InitializeViewLoadout(draft.spec, draft.level or 60)
+    end
+    self:RefreshOverlays()
 end
 
 -- Read the same trait tooltip data as Blizzard, without calling its talent
@@ -1461,63 +1700,69 @@ function T:RefreshOverlays()
         for _, line in ipairs(tree.lines) do line:Hide(); if line.arrow then line.arrow:Hide() end end
         local lineIndex = 0
         for _, entry in ipairs(entries) do
-            local reqID = entry.prereqs and entry.prereqs[1] and entry.prereqs[1].id
-                or (entry.req ~= 0 and self:ResolveWebNode(entry.req) or nil)
-            local source, target = canvas.buttons[reqID], canvas.buttons[entry.id]
-            if source and target and source.treeIndex == index then
-                lineIndex = lineIndex + 1
-                local line = tree.lines[lineIndex]
-                if not line then
-                    -- Use only the native artwork/template on an addon-owned frame.
-                    -- Never initialize an edge with Blizzard's live talent buttons.
-                    local edge = CreateFrame("Frame", nil, canvas.nodeLayer, "TalentEdgeArrowTemplate")
-                    line = edge.Line
-                    line.edge, line.arrow = edge, edge.ArrowHead
-                    tree.lines[lineIndex] = line
+            local prerequisites = entry.prereqs
+            if not prerequisites then
+                local reqID = entry.req ~= 0 and self:ResolveWebNode(entry.req) or nil
+                prerequisites = reqID and {{id = reqID}} or {}
+            end
+            for _, prerequisite in ipairs(prerequisites) do
+                local reqID = prerequisite.id
+                local source, target = canvas.buttons[reqID], canvas.buttons[entry.id]
+                if source and target and source.treeIndex == index then
+                    lineIndex = lineIndex + 1
+                    local line = tree.lines[lineIndex]
+                    if not line then
+                        -- Use only the native artwork/template on an addon-owned frame.
+                        -- Never initialize an edge with Blizzard's live talent buttons.
+                        local edge = CreateFrame("Frame", nil, canvas.nodeLayer, "TalentEdgeArrowTemplate")
+                        line = edge.Line
+                        line.edge, line.arrow = edge, edge.ArrowHead
+                        tree.lines[lineIndex] = line
+                    end
+                    -- Keep connectors above every planner decoration and talent button.
+                    -- Use the planner's strata so tooltips still appear above the tree.
+                    line.edge:SetFrameStrata(canvas:GetFrameStrata())
+                    line.edge:SetFrameLevel(canvas:GetFrameLevel() + 1000)
+                    line:SetDrawLayer("OVERLAY", 7)
+                    line.arrow:SetDrawLayer("OVERLAY", 7)
+                    local purchased = (self.draft.ranks[reqID] or 0) >= self.draft.nodes[reqID].maxRanks
+                    local lowerPoints = 0
+                    for _, other in ipairs(entries) do
+                        if other.row < entry.row then lowerPoints = lowerPoints + (self.draft.ranks[other.id] or 0) end
+                    end
+                    local gated = lowerPoints < entry.row * 5
+                    local state = gated and "locked" or (purchased and "yellow" or "gray")
+                    line:SetThickness(6)
+                    line:SetAtlas("talents-arrow-line-" .. state, false)
+                    local a = self.draft.nodes[reqID]
+                    local b = self.draft.nodes[entry.id]
+                    local dx, dy = (a.posX or 0) - (b.posX or 0), (b.posY or 0) - (a.posY or 0)
+                    local length = math.sqrt(dx * dx + dy * dy)
+                    local angle = math.atan2 and math.atan2(dy, dx) or math.atan(dy, dx)
+                    local quarter, eighth = math.pi / 2, math.pi / 4
+                    local progress = math.abs(((eighth + angle) % quarter) - eighth)
+                    local minimum = TalentButtonUtil and TalentButtonUtil.SquareEdgeMinDiameterOffset or 1.2
+                    local maximum = TalentButtonUtil and TalentButtonUtil.SquareEdgeMaxDiameterOffset or 1.5
+                    local radius = target:GetWidth() / 2 * (minimum + (maximum - minimum) * progress)
+                    -- Higher edges can no longer rely on the source icon hiding the
+                    -- centre of the line. Start at its border instead.
+                    -- The source has no arrowhead: intersect its square border
+                    -- directly rather than applying the destination head offset.
+                    local sourceRadius = length > 0 and source:GetWidth() / 2
+                        * length / math.max(math.abs(dx), math.abs(dy)) or source:GetWidth() / 2
+                    local sx, sy = length > 0 and -dx / length * sourceRadius or 0,
+                        length > 0 and -dy / length * sourceRadius or -sourceRadius
+                    line:SetStartPoint("CENTER", source, sx, sy)
+                    local ox, oy = length > 0 and dx / length * radius or 0,
+                        length > 0 and dy / length * radius or radius
+                    line:SetEndPoint("CENTER", target, ox, oy)
+                    line.arrow:SetAtlas("talents-arrow-head-" .. state, true)
+                    line.arrow:ClearAllPoints()
+                    line.arrow:SetPoint("CENTER", target, "CENTER", ox, oy)
+                    line.arrow:SetRotation(angle - math.pi / 2)
+                    line.arrow:Show()
+                    line:Show()
                 end
-                -- Keep connectors above every planner decoration and talent button.
-                -- Use the planner's strata so tooltips still appear above the tree.
-                line.edge:SetFrameStrata(canvas:GetFrameStrata())
-                line.edge:SetFrameLevel(canvas:GetFrameLevel() + 1000)
-                line:SetDrawLayer("OVERLAY", 7)
-                line.arrow:SetDrawLayer("OVERLAY", 7)
-                local purchased = (self.draft.ranks[reqID] or 0) >= self.draft.nodes[reqID].maxRanks
-                local lowerPoints = 0
-                for _, other in ipairs(entries) do
-                    if other.row < entry.row then lowerPoints = lowerPoints + (self.draft.ranks[other.id] or 0) end
-                end
-                local gated = lowerPoints < entry.row * 5
-                local state = gated and "locked" or (purchased and "yellow" or "gray")
-                line:SetThickness(6)
-                line:SetAtlas("talents-arrow-line-" .. state, false)
-                local a = self.draft.nodes[reqID]
-                local b = self.draft.nodes[entry.id]
-                local dx, dy = (a.posX or 0) - (b.posX or 0), (b.posY or 0) - (a.posY or 0)
-                local length = math.sqrt(dx * dx + dy * dy)
-                local angle = math.atan2 and math.atan2(dy, dx) or math.atan(dy, dx)
-                local quarter, eighth = math.pi / 2, math.pi / 4
-                local progress = math.abs(((eighth + angle) % quarter) - eighth)
-                local minimum = TalentButtonUtil and TalentButtonUtil.SquareEdgeMinDiameterOffset or 1.2
-                local maximum = TalentButtonUtil and TalentButtonUtil.SquareEdgeMaxDiameterOffset or 1.5
-                local radius = target:GetWidth() / 2 * (minimum + (maximum - minimum) * progress)
-                -- Higher edges can no longer rely on the source icon hiding the
-                -- centre of the line. Start at its border instead.
-                -- The source has no arrowhead: intersect its square border
-                -- directly rather than applying the destination head offset.
-                local sourceRadius = length > 0 and source:GetWidth() / 2
-                    * length / math.max(math.abs(dx), math.abs(dy)) or source:GetWidth() / 2
-                local sx, sy = length > 0 and -dx / length * sourceRadius or 0,
-                    length > 0 and -dy / length * sourceRadius or -sourceRadius
-                line:SetStartPoint("CENTER", source, sx, sy)
-                local ox, oy = length > 0 and dx / length * radius or 0,
-                    length > 0 and dy / length * radius or radius
-                line:SetEndPoint("CENTER", target, ox, oy)
-                line.arrow:SetAtlas("talents-arrow-head-" .. state, true)
-                line.arrow:ClearAllPoints()
-                line.arrow:SetPoint("CENTER", target, "CENTER", ox, oy)
-                line.arrow:SetRotation(angle - math.pi / 2)
-                line.arrow:Show()
-                line:Show()
             end
         end
     end

@@ -126,6 +126,16 @@ function T:SaveTemplate(name, overwrite)
     end
     if self.unreadableTemplate then return false, L.SAVED_BUILD_UNREADABLE end
     local snapshot
+    local changedNodes = {}
+    local old = previous and self.db.templates[previous]
+    local oldAllocation = old and old.allocation
+    for id, rank in pairs(self.draft.ranks or {}) do
+        local oldRank = oldAllocation and oldAllocation.ranks and oldAllocation.ranks[id] or 0
+        local oldChoice = oldAllocation and oldAllocation.choices and oldAllocation.choices[id] or 1
+        if rank > 0 and (rank > oldRank or (self.draft.choices and self.draft.choices[id] or 1) ~= oldChoice) then
+            changedNodes[#changedNodes + 1] = id
+        end
+    end
     if self.draft.nodes then
         snapshot = { ranks = {}, choices = {} }
         for id, rank in pairs(self.draft.ranks) do snapshot.ranks[id] = rank end
@@ -135,9 +145,14 @@ function T:SaveTemplate(name, overwrite)
     if previous and previous ~= name then self.db.templates[previous] = nil end
     self.db.templates[name] = { code = self.draft.code, spec = self.draft.spec,
         level = self.draft.level, allocation = snapshot }
+    if self.draft.nodes then
+        -- The saved code now uses the current tree hash. Keep a warning only
+        -- for actual allocation errors, not the version it was opened from.
+        self.draft.recoveryWarning = not self:IsPlanValid()
+    end
     self.selected = name
     self:ResetDraftBaseline()
-    if self.FlashSaved then self:FlashSaved(overwrite) end
+    if self.FlashSaved then self:FlashSaved(overwrite, changedNodes) end
     return true, overwrite and L.TALENT_BUILD_UPDATED or L.TALENT_BUILD_SAVED
 end
 
